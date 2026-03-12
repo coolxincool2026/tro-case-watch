@@ -197,7 +197,7 @@ function serializePublicStatus(status = {}) {
 
   return {
     isRunning: Boolean(status.isRunning),
-    currentMode: status.isRunning ? "recent" : null,
+    currentMode: status.currentMode || null,
     lastStartedAt: status.lastStartedAt || null,
     lastFinishedAt: status.lastFinishedAt || null,
     dashboard: {

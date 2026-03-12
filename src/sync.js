@@ -136,23 +136,41 @@ export class CaseSyncService {
     };
 
     try {
+      let successfulPresets = 0;
       for (const preset of discoveryPresets) {
-        const result = await this.syncPreset(preset, mode);
-        stats.pagesFetched += result.pagesFetched;
-        stats.casesUpserted += result.casesUpserted;
-        stats.docketEntriesUpserted += result.docketEntriesUpserted;
+        try {
+          const result = await this.syncPreset(preset, mode);
+          stats.pagesFetched += result.pagesFetched;
+          stats.casesUpserted += result.casesUpserted;
+          stats.docketEntriesUpserted += result.docketEntriesUpserted;
+          successfulPresets += 1;
+        } catch (error) {
+          stats.notes.push(`CourtListener 搜索预设 ${preset.label} 失败：${error.message}`);
+        }
       }
 
-      const docketResult = await this.syncCourtListenerDockets();
-      stats.docketCasesSynced += docketResult.syncedCases;
-      if (docketResult.note) {
-        stats.notes.push(docketResult.note);
+      if (!successfulPresets) {
+        throw new Error("CourtListener 搜索预设全部失败");
       }
 
-      const worldtroResult = await this.syncWorldtroRecent(mode);
-      stats.worldtroCasesSynced += worldtroResult.syncedCases;
-      if (worldtroResult.note) {
-        stats.notes.push(worldtroResult.note);
+      try {
+        const docketResult = await this.syncCourtListenerDockets();
+        stats.docketCasesSynced += docketResult.syncedCases;
+        if (docketResult.note) {
+          stats.notes.push(docketResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`CourtListener docket 补抓跳过：${error.message}`);
+      }
+
+      try {
+        const worldtroResult = await this.syncWorldtroRecent(mode);
+        stats.worldtroCasesSynced += worldtroResult.syncedCases;
+        if (worldtroResult.note) {
+          stats.notes.push(worldtroResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`WorldTRO 补源跳过：${error.message}`);
       }
 
       try {
@@ -162,9 +180,19 @@ export class CaseSyncService {
         stats.notes.push(`翻译链路跳过：${error.message}`);
       }
 
-      const pacerMonitorResult = await this.pacerMonitor.syncRecent();
-      const pacerResult = await this.pacer.syncRecent();
-      stats.notes.push(pacerMonitorResult.note, pacerResult.note);
+      try {
+        const pacerMonitorResult = await this.pacerMonitor.syncRecent();
+        stats.notes.push(pacerMonitorResult.note);
+      } catch (error) {
+        stats.notes.push(`PACERMonitor 跳过：${error.message}`);
+      }
+
+      try {
+        const pacerResult = await this.pacer.syncRecent();
+        stats.notes.push(pacerResult.note);
+      } catch (error) {
+        stats.notes.push(`PACER 跳过：${error.message}`);
+      }
 
       this.store.finishSyncRun(runId, "succeeded", stats);
       this.state.lastFinishedAt = new Date().toISOString();

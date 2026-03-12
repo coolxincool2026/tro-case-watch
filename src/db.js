@@ -569,7 +569,9 @@ export class Store {
 
     const categoryFiltered = rows.filter((row) => this.matchesCategory(row, category));
     const searchFiltered = searchTerm
-      ? categoryFiltered.filter((row) => this.matchesSearch(row, searchTerm))
+      ? categoryFiltered
+          .filter((row) => this.matchesSearch(row, searchTerm))
+          .sort((left, right) => this.compareSearchPriority(left, right, searchTerm))
       : categoryFiltered;
 
     const courtsMap = new Map();
@@ -922,5 +924,58 @@ export class Store {
 
     const docketNeedle = normalizeDocket(searchTerm);
     return haystack.includes(searchTerm) || (docketNeedle && haystack.includes(docketNeedle));
+  }
+
+  compareSearchPriority(left, right, searchTerm) {
+    const priorityDiff = this.searchPriority(right, searchTerm) - this.searchPriority(left, searchTerm);
+    if (priorityDiff !== 0) {
+      return priorityDiff;
+    }
+
+    return (
+      String(right.latest_docket_filed_at || right.date_filed || right.updated_at).localeCompare(
+        String(left.latest_docket_filed_at || left.date_filed || left.updated_at)
+      ) || String(right.updated_at || "").localeCompare(String(left.updated_at || ""))
+    );
+  }
+
+  searchPriority(row, searchTerm) {
+    const rawNeedle = String(searchTerm || "").trim();
+    const normalizedNeedle = normalizeDocket(rawNeedle);
+    const docketRaw = normalizeText(row.docket_number);
+    const docketNormalized = normalizeDocket(row.docket_number);
+    const labelBlob = normalizeText([
+      row.case_name,
+      row.insights?.brand_name,
+      row.insights?.lead_law_firm,
+      ...(row.plaintiffs || []),
+      ...(row.defendants || [])
+    ].join(" | "));
+
+    let score = 0;
+
+    if (rawNeedle && docketRaw === rawNeedle) {
+      score += 120;
+    } else if (rawNeedle && docketRaw.includes(rawNeedle)) {
+      score += 55;
+    }
+
+    if (normalizedNeedle && docketNormalized === normalizedNeedle) {
+      score += 140;
+    } else if (normalizedNeedle && docketNormalized.endsWith(normalizedNeedle)) {
+      score += 90;
+    } else if (normalizedNeedle && docketNormalized.includes(normalizedNeedle)) {
+      score += 45;
+    }
+
+    if (labelBlob.includes(searchTerm)) {
+      score += 15;
+    }
+
+    if (row.insights?.is_seller_case) {
+      score += 5;
+    }
+
+    return score;
   }
 }

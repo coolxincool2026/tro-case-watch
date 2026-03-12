@@ -77,6 +77,10 @@ export class CourtListenerClient {
   }
 
   async fetchJson(url, { requiresAuth }) {
+    return this.fetchJsonWithRetry(url, { requiresAuth }, 0);
+  }
+
+  async fetchJsonWithRetry(url, { requiresAuth }, attempt) {
     const headers = {
       accept: "application/json",
       "user-agent": "tro-case-watch/0.1"
@@ -86,17 +90,54 @@ export class CourtListenerClient {
       headers.authorization = `Token ${this.apiToken}`;
     }
 
-    const response = await fetch(url, { headers });
-    const text = await response.text();
+    try {
+      const response = await fetch(url, { headers });
+      const text = await response.text();
 
-    if (!response.ok) {
-      const error = new Error(`CourtListener request failed: ${response.status}`);
-      error.status = response.status;
-      error.body = text;
-      error.requiresAuth = requiresAuth;
+      if (!response.ok) {
+        if (attempt < 2 && shouldRetryStatus(response.status)) {
+          await delay(retryDelayMs(response.headers.get("retry-after"), attempt));
+          return this.fetchJsonWithRetry(url, { requiresAuth }, attempt + 1);
+        }
+
+        const error = new Error(`CourtListener request failed: ${response.status}`);
+        error.status = response.status;
+        error.body = text;
+        error.requiresAuth = requiresAuth;
+        throw error;
+      }
+
+      return JSON.parse(text);
+    } catch (error) {
+      if (attempt < 2 && shouldRetryError(error)) {
+        await delay(retryDelayMs(null, attempt));
+        return this.fetchJsonWithRetry(url, { requiresAuth }, attempt + 1);
+      }
+
       throw error;
     }
-
-    return JSON.parse(text);
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function shouldRetryStatus(status) {
+  return [408, 409, 425, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+function shouldRetryError(error) {
+  return error instanceof TypeError || String(error?.message || "").includes("fetch failed");
+}
+
+function retryDelayMs(retryAfterHeader, attempt) {
+  const retryAfter = Number.parseInt(String(retryAfterHeader || ""), 10);
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return retryAfter * 1000;
+  }
+
+  return 1500 * (attempt + 1);
 }
