@@ -58,6 +58,8 @@ export const config = {
   dataDir,
   publicDir: path.join(projectRoot, "public"),
   dbPath: path.join(dataDir, "tro-watch.sqlite"),
+  seedDbArchivePath: env("SEED_DB_ARCHIVE_PATH", path.join(projectRoot, "seed", "tro-watch.sqlite.gz")),
+  seedDbMinimumCases: envInt("SEED_DB_MIN_CASES", 10000),
   server: {
     port: envInt("PORT", 4127),
     adminToken: env("ADMIN_TOKEN", "")
@@ -67,8 +69,8 @@ export const config = {
     enableBackfillScheduler: envBool("ENABLE_BACKFILL_SCHEDULER", true),
     bootstrapSync: envBool("BOOTSTRAP_SYNC", true),
     startDate: env("START_DATE", "2025-01-01"),
-    pollIntervalMs: envInt("POLL_INTERVAL_MS", 10 * 60 * 1000),
-    backfillIntervalMs: envInt("BACKFILL_INTERVAL_MS", 30 * 60 * 1000),
+    pollIntervalMs: envInt("POLL_INTERVAL_MS", 30 * 60 * 1000),
+    backfillIntervalMs: envInt("BACKFILL_INTERVAL_MS", 60 * 60 * 1000),
     discoveryMaxPagesPerRun: envInt("DISCOVERY_MAX_PAGES_PER_RUN", 3),
     backfillMaxPagesPerRun: envInt("BACKFILL_MAX_PAGES_PER_RUN", 50)
   },

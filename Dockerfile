@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY package.json ./
 COPY public ./public
+COPY seed ./seed
 COPY src ./src
 
 EXPOSE 4127

@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import { DatabaseSync } from "node:sqlite";
+import zlib from "node:zlib";
 import { URL } from "node:url";
 import { config } from "./config.js";
 import { Store } from "./db.js";
@@ -25,6 +27,8 @@ const mimeTypes = {
   ".webp": "image/webp"
 };
 
+ensureSeedDatabase();
+
 const store = new Store(config.dbPath);
 const courtListener = new CourtListenerClient(config.courtListener);
 const worldtro = new WorldtroClient(config.worldtro);
@@ -40,6 +44,48 @@ const syncService = new CaseSyncService({
   pacer,
   translator
 });
+
+function ensureSeedDatabase() {
+  if (!config.seedDbArchivePath || !fs.existsSync(config.seedDbArchivePath)) {
+    return;
+  }
+
+  const shouldRestore = needsSeedRestore();
+  if (!shouldRestore.restore) {
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
+  const archive = fs.readFileSync(config.seedDbArchivePath);
+  const dbBuffer = zlib.gunzipSync(archive);
+  fs.writeFileSync(config.dbPath, dbBuffer);
+  console.log(`[bootstrap-db] restored seed database from ${config.seedDbArchivePath} (${shouldRestore.reason})`);
+}
+
+function needsSeedRestore() {
+  if (!fs.existsSync(config.dbPath)) {
+    return { restore: true, reason: "db-missing" };
+  }
+
+  const stats = fs.statSync(config.dbPath);
+  if (stats.size === 0) {
+    return { restore: true, reason: "db-empty" };
+  }
+
+  try {
+    const db = new DatabaseSync(config.dbPath, { readOnly: true });
+    const row = db.prepare("SELECT COUNT(*) AS total FROM cases").get();
+    db.close();
+    const total = Number(row?.total || 0);
+    if (total < config.seedDbMinimumCases) {
+      return { restore: true, reason: `db-too-small:${total}` };
+    }
+  } catch {
+    return { restore: true, reason: "db-unreadable" };
+  }
+
+  return { restore: false, reason: "db-ready" };
+}
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
