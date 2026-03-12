@@ -47,6 +47,15 @@ function normalizeSourceUrl(value) {
   return raw;
 }
 
+function looksLikeDocketSearch(value = "") {
+  const text = String(value || "").trim();
+  return /^\d{4,6}$/.test(text) || /\b\d{2}-cv-\d{3,6}\b/i.test(text) || /\b\d+:\d{2}-cv-\d{3,6}\b/i.test(text);
+}
+
+function compareIsoDesc(left, right) {
+  return String(right || "").localeCompare(String(left || ""));
+}
+
 function hydrateCase(row) {
   if (!row) {
     return null;
@@ -936,10 +945,18 @@ export class Store {
       return priorityDiff;
     }
 
+    if (looksLikeDocketSearch(searchTerm)) {
+      const filedAtDiff = compareIsoDesc(left.date_filed, right.date_filed);
+      if (filedAtDiff !== 0) {
+        return filedAtDiff;
+      }
+    }
+
     return (
-      String(right.latest_docket_filed_at || right.date_filed || right.updated_at).localeCompare(
-        String(left.latest_docket_filed_at || left.date_filed || left.updated_at)
-      ) || String(right.updated_at || "").localeCompare(String(left.updated_at || ""))
+      compareIsoDesc(
+        left.latest_docket_filed_at || left.date_filed || left.updated_at,
+        right.latest_docket_filed_at || right.date_filed || right.updated_at
+      ) || compareIsoDesc(left.updated_at, right.updated_at)
     );
   }
 
