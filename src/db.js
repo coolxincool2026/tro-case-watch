@@ -280,6 +280,7 @@ export class Store {
     this.db = new DatabaseSync(dbPath);
     this.caseCacheVersion = 0;
     this.caseViewCache = new Map();
+    this.caseDetailCache = new Map();
     this.dashboardStatsCache = null;
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -383,6 +384,7 @@ export class Store {
   invalidateCaseViews() {
     this.caseCacheVersion += 1;
     this.caseViewCache.clear();
+    this.caseDetailCache.clear();
     this.dashboardStatsCache = null;
   }
 
@@ -701,6 +703,12 @@ export class Store {
   }
 
   getCase(id) {
+    const cacheKey = Number(id);
+    const cached = this.caseDetailCache.get(cacheKey);
+    if (cached && cached.version === this.caseCacheVersion) {
+      return cached.value;
+    }
+
     const row = hydrateCase(this.db.prepare("SELECT * FROM cases WHERE id = ?").get(id));
     if (!row) {
       return null;
@@ -718,7 +726,7 @@ export class Store {
 
     const uniqueEntries = dedupeEntries(entries);
 
-    return {
+    const detail = {
       ...row,
       entries: uniqueEntries,
       insights: deriveCaseInsights({
@@ -726,6 +734,13 @@ export class Store {
         entries: uniqueEntries
       })
     };
+
+    this.caseDetailCache.set(cacheKey, {
+      version: this.caseCacheVersion,
+      value: detail
+    });
+
+    return detail;
   }
 
   getCasesNeedingDocketSync(limit) {

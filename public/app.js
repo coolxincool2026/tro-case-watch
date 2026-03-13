@@ -12,6 +12,8 @@ const detailCache = new Map();
 const detailCacheTtlMs = 2 * 60 * 1000;
 let currentCasesPayload = null;
 let detailRequestToken = 0;
+let casesRequestToken = 0;
+const inflightDetailRequests = new Map();
 const caseRoutePattern = /^\/case\/(\d+)\/?$/;
 
 const caseList = document.querySelector("#case-list");
@@ -157,6 +159,16 @@ function renderCourtOptions(courts) {
     .join("");
 }
 
+function renderCasesLoading(message = "正在检索案件，请稍候。") {
+  casesSummary.textContent = message;
+  caseList.innerHTML = `
+    <article class="case-row">
+      <h3>正在载入案件列表</h3>
+      <p>已收到你的检索请求，正在同步站内结果。</p>
+    </article>
+  `;
+}
+
 function caseStatusBadge(item) {
   const status = item.insights?.status || {};
   return `<span class="status-pill ${toneClass(status)}">${status.label || "持续观察"}</span>`;
@@ -259,18 +271,30 @@ function renderCases(payload) {
     return;
   }
 
-  if (!state.selectedCaseId && payload.items.length) {
-    state.selectedCaseId = payload.items[0].id;
+  const routeCaseId = getRouteCaseId();
+  const selectedItem = payload.items.find((item) => item.id === state.selectedCaseId) || null;
+  const fallbackItem = payload.items[0] || null;
+
+  if ((!state.selectedCaseId || !selectedItem) && fallbackItem && !routeCaseId) {
+    state.selectedCaseId = fallbackItem.id;
     loadCaseDetail(state.selectedCaseId, {
-      summaryItem: payload.items[0]
-    });
+      summaryItem: fallbackItem,
+      updateRoute: true
+    }).catch(console.error);
   }
 
   caseList.innerHTML = payload.items.map(renderCaseRow).join("");
   updateActiveCaseRow();
   caseList.querySelectorAll("[data-case-id]").forEach((button) => {
+    const caseId = Number(button.dataset.caseId);
+    button.addEventListener("mouseenter", () => {
+      prefetchCaseDetail(caseId);
+    });
+    button.addEventListener("focus", () => {
+      prefetchCaseDetail(caseId);
+    });
     button.addEventListener("click", () => {
-      state.selectedCaseId = Number(button.dataset.caseId);
+      state.selectedCaseId = caseId;
       const summaryItem = payload.items.find((item) => item.id === state.selectedCaseId) || null;
       updateActiveCaseRow();
       loadCaseDetail(state.selectedCaseId, {
@@ -501,13 +525,62 @@ function shouldCacheDetail(item) {
   return !(item.insights?.badges || []).includes("跨境卖家相关") || entriesCount >= 12;
 }
 
+function cacheDetailItem(caseId, item) {
+  if (shouldCacheDetail(item)) {
+    detailCache.set(caseId, {
+      item,
+      cachedAt: Date.now()
+    });
+    return;
+  }
+
+  detailCache.delete(caseId);
+}
+
+async function fetchCaseDetail(caseId) {
+  const cached = getCachedDetail(caseId);
+  if (cached) {
+    return cached;
+  }
+
+  if (inflightDetailRequests.has(caseId)) {
+    return inflightDetailRequests.get(caseId);
+  }
+
+  const requestPromise = request(`/api/cases/${caseId}`)
+    .then((item) => {
+      cacheDetailItem(caseId, item);
+      return item;
+    })
+    .finally(() => {
+      inflightDetailRequests.delete(caseId);
+    });
+
+  inflightDetailRequests.set(caseId, requestPromise);
+  return requestPromise;
+}
+
+function prefetchCaseDetail(caseId) {
+  if (!caseId || getCachedDetail(caseId) || inflightDetailRequests.has(caseId)) {
+    return;
+  }
+
+  fetchCaseDetail(caseId).catch(() => {});
+}
+
+function prefetchVisibleCaseDetails(items = []) {
+  items.slice(0, 3).forEach((item) => prefetchCaseDetail(item.id));
+}
+
 async function loadStatus() {
   const status = await request("/api/sync/status");
   renderHero(status);
 }
 
-async function loadCases() {
+async function loadCases({ autoSelectFirst = false, preserveSelection = true } = {}) {
+  const requestToken = ++casesRequestToken;
   lookupInput.value = state.search;
+  renderCasesLoading(state.search ? `正在检索 ${state.search} ...` : "正在刷新案件列表...");
 
   const params = new URLSearchParams({
     category: state.category,
@@ -518,7 +591,17 @@ async function loadCases() {
   });
 
   const payload = await request(`/api/cases?${params.toString()}`);
+  if (requestToken !== casesRequestToken) {
+    return null;
+  }
+
+  if (autoSelectFirst || !preserveSelection) {
+    state.selectedCaseId = null;
+  }
+
   renderCases(payload);
+  prefetchVisibleCaseDetails(payload.items || []);
+  return payload;
 }
 
 async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updateRoute = false } = {}) {
@@ -544,18 +627,9 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
     return;
   }
 
-  const item = await request(`/api/cases/${caseId}`);
+  const item = await fetchCaseDetail(caseId);
   if (requestToken !== detailRequestToken) {
     return;
-  }
-
-  if (shouldCacheDetail(item)) {
-    detailCache.set(caseId, {
-      item,
-      cachedAt: Date.now()
-    });
-  } else {
-    detailCache.delete(caseId);
   }
 
   renderDetail(item);
@@ -565,13 +639,27 @@ lookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
   state.search = lookupInput.value.trim();
   state.page = 1;
-  loadCases().then(revealResultsIfNeeded).catch(console.error);
+  loadCases({
+    autoSelectFirst: true,
+    preserveSelection: false
+  }).then((payload) => {
+    if (payload) {
+      revealResultsIfNeeded();
+    }
+  }).catch(console.error);
 });
 
 courtFilter.addEventListener("change", (event) => {
   state.court = String(event.target.value || "");
   state.page = 1;
-  loadCases().then(revealResultsIfNeeded).catch(console.error);
+  loadCases({
+    autoSelectFirst: true,
+    preserveSelection: false
+  }).then((payload) => {
+    if (payload) {
+      revealResultsIfNeeded();
+    }
+  }).catch(console.error);
 });
 
 prevPageButton.addEventListener("click", () => {
@@ -579,7 +667,11 @@ prevPageButton.addEventListener("click", () => {
     return;
   }
   state.page -= 1;
-  loadCases();
+  state.selectedCaseId = null;
+  loadCases({
+    autoSelectFirst: true,
+    preserveSelection: false
+  }).catch(console.error);
 });
 
 nextPageButton.addEventListener("click", () => {
@@ -587,7 +679,11 @@ nextPageButton.addEventListener("click", () => {
     return;
   }
   state.page += 1;
-  loadCases();
+  state.selectedCaseId = null;
+  loadCases({
+    autoSelectFirst: true,
+    preserveSelection: false
+  }).catch(console.error);
 });
 
 refreshButton.addEventListener("click", async () => {
@@ -601,7 +697,12 @@ refreshButton.addEventListener("click", async () => {
       },
       body: JSON.stringify({ mode: "recent" })
     });
-    await Promise.all([loadStatus(), loadCases()]);
+    await Promise.all([
+      loadStatus(),
+      loadCases({
+        preserveSelection: true
+      })
+    ]);
   } finally {
     refreshButton.disabled = false;
     refreshButton.textContent = "立即刷新";
@@ -635,14 +736,11 @@ async function boot() {
     });
   }
 
-  const [casesResult, statusResult] = await Promise.allSettled([loadCases(), loadStatus()]);
-  if (casesResult.status === "rejected") {
-    throw casesResult.reason;
-  }
-
-  if (statusResult.status === "rejected") {
-    console.error(statusResult.reason);
-  }
+  await loadCases({
+    autoSelectFirst: !routeCaseId,
+    preserveSelection: Boolean(routeCaseId)
+  });
+  loadStatus().catch(console.error);
 
   if (routeCaseId) {
     const summaryItem = currentCasesPayload?.items?.find((item) => item.id === routeCaseId) || null;
