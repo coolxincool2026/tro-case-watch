@@ -195,6 +195,11 @@ export class CaseSyncService {
       }
 
       this.store.finishSyncRun(runId, "succeeded", stats);
+      try {
+        this.store.getDashboardStats();
+      } catch (error) {
+        stats.notes.push(`缓存预热跳过：${error.message}`);
+      }
       this.state.lastFinishedAt = new Date().toISOString();
       this.state.lastStats = stats;
       return this.getPublicStatus();

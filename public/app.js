@@ -1,7 +1,7 @@
 const state = {
   page: 1,
   pageSize: 15,
-  category: "tro",
+  category: "watchlist",
   court: "",
   search: "",
   selectedCaseId: null,
@@ -21,6 +21,7 @@ const nextPageButton = document.querySelector("#next-page");
 const refreshButton = document.querySelector("#refresh-button");
 const contentGrid = document.querySelector(".content-grid");
 const copyWechatButton = document.querySelector("#copy-wechat-button");
+const statusPollMs = 5 * 60 * 1000;
 const apiBase =
   window.location.hostname === "www.trotracker.com" ? "https://tro-case-watch-production.up.railway.app" : "";
 
@@ -481,11 +482,18 @@ if (copyWechatButton) {
 }
 
 async function boot() {
-  await Promise.all([loadStatus(), loadCases()]);
+  const [casesResult, statusResult] = await Promise.allSettled([loadCases(), loadStatus()]);
+  if (casesResult.status === "rejected") {
+    throw casesResult.reason;
+  }
+
+  if (statusResult.status === "rejected") {
+    console.error(statusResult.reason);
+  }
+
   window.setInterval(() => {
     loadStatus().catch(() => {});
-    loadCases().catch(() => {});
-  }, 30000);
+  }, statusPollMs);
 }
 
 boot().catch((error) => {

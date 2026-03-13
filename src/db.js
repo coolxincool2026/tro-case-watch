@@ -222,6 +222,8 @@ export class Store {
   constructor(dbPath) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
+    this.caseCacheVersion = 0;
+    this.caseViewCache = new Map();
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -319,6 +321,42 @@ export class Store {
         PRIMARY KEY (provider, usage_day)
       );
     `);
+  }
+
+  invalidateCaseViews() {
+    this.caseCacheVersion += 1;
+    this.caseViewCache.clear();
+  }
+
+  getHydratedCases(startDate = "2025-01-01") {
+    const cacheKey = String(startDate || "2025-01-01");
+    const cached = this.caseViewCache.get(cacheKey);
+    if (cached && cached.version === this.caseCacheVersion) {
+      return cached.rows;
+    }
+
+    const rows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date(?)
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+      `)
+      .all(cacheKey)
+      .map((row) => {
+        const hydrated = hydrateCase(row);
+        return {
+          ...hydrated,
+          insights: deriveCaseInsights(hydrated)
+        };
+      });
+
+    this.caseViewCache.set(cacheKey, {
+      version: this.caseCacheVersion,
+      rows
+    });
+
+    return rows;
   }
 
   upsertCase(record) {
@@ -443,6 +481,8 @@ export class Store {
         timestamp
       );
 
+    this.invalidateCaseViews();
+
     return hydrateCase(
       this.db.prepare("SELECT * FROM cases WHERE source_case_key = ?").get(record.source_case_key)
     );
@@ -461,12 +501,14 @@ export class Store {
     values.push(nowIso(), nowIso(), caseId);
 
     this.db.prepare(`UPDATE cases SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    this.invalidateCaseViews();
   }
 
   touchCaseDocketSync(caseId) {
     this.db
       .prepare("UPDATE cases SET last_docket_sync_at = ?, updated_at = ? WHERE id = ?")
       .run(nowIso(), nowIso(), caseId);
+    this.invalidateCaseViews();
   }
 
   upsertDocketEntry(record) {
@@ -540,6 +582,8 @@ export class Store {
         timestamp
       );
 
+    this.invalidateCaseViews();
+
     return hydrateEntry(
       this.db.prepare("SELECT * FROM docket_entries WHERE source_entry_key = ?").get(record.source_entry_key)
     );
@@ -549,6 +593,7 @@ export class Store {
     this.db
       .prepare("UPDATE docket_entries SET description_zh = ?, updated_at = ? WHERE id = ?")
       .run(translation, nowIso(), entryId);
+    this.invalidateCaseViews();
   }
 
   listCases(filters = {}) {
@@ -556,21 +601,7 @@ export class Store {
     const pageSize = Math.min(Number(filters.pageSize || 25), 100);
     const page = Math.max(Number(filters.page || 1), 1);
 
-    const rows = this.db
-      .prepare(`
-        SELECT *
-        FROM cases
-        WHERE date(date_filed) >= date(?)
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
-      `)
-      .all(startDate)
-      .map((row) => {
-        const hydrated = hydrateCase(row);
-        return {
-          ...hydrated,
-          insights: deriveCaseInsights(hydrated)
-        };
-      });
+    const rows = this.getHydratedCases(startDate);
 
     const category = filters.category || "seller_watch";
     const searchTerm = normalizeText(filters.search || "");
@@ -662,21 +693,7 @@ export class Store {
 
   getCasesNeedingWorldtroSync(limit, staleAfterHours = 12) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
-    const rows = this.db
-      .prepare(`
-        SELECT *
-        FROM cases
-        WHERE date(date_filed) >= date('2025-01-01')
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
-      `)
-      .all()
-      .map((row) => {
-        const hydrated = hydrateCase(row);
-        return {
-          ...hydrated,
-          insights: deriveCaseInsights(hydrated)
-        };
-      })
+    const rows = this.getHydratedCases("2025-01-01")
       .filter((row) => {
         if (!row.insights?.is_seller_case) {
           return false;
@@ -818,20 +835,7 @@ export class Store {
   }
 
   getDashboardStats() {
-    const rows = this.db
-      .prepare(`
-        SELECT *
-        FROM cases
-        WHERE date(date_filed) >= date('2025-01-01')
-      `)
-      .all()
-      .map((row) => {
-        const hydrated = hydrateCase(row);
-        return {
-          ...hydrated,
-          insights: deriveCaseInsights(hydrated)
-        };
-      });
+    const rows = this.getHydratedCases("2025-01-01");
 
     const totals = {
       total_cases: rows.length,
