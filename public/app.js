@@ -12,6 +12,7 @@ const detailCache = new Map();
 const detailCacheTtlMs = 2 * 60 * 1000;
 let currentCasesPayload = null;
 let detailRequestToken = 0;
+const caseRoutePattern = /^\/case\/(\d+)\/?$/;
 
 const caseList = document.querySelector("#case-list");
 const detailPanel = document.querySelector("#detail-panel");
@@ -29,6 +30,28 @@ const copyWechatButton = document.querySelector("#copy-wechat-button");
 const statusPollMs = 5 * 60 * 1000;
 const apiBase =
   window.location.hostname === "www.trotracker.com" ? "https://tro-case-watch-production.up.railway.app" : "";
+
+function getRouteCaseId() {
+  const match = window.location.pathname.match(caseRoutePattern);
+  if (!match) {
+    return null;
+  }
+
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function setCaseRoute(caseId, { replace = false } = {}) {
+  if (!window.history?.pushState) {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  url.pathname = caseId ? `/case/${caseId}` : "/";
+  url.hash = caseId ? "detail-panel" : "";
+  const method = replace ? "replaceState" : "pushState";
+  window.history[method](null, "", url);
+}
 
 function formatDate(value) {
   if (!value) {
@@ -236,7 +259,7 @@ function renderCases(payload) {
     return;
   }
 
-  if (!payload.items.some((item) => item.id === state.selectedCaseId)) {
+  if (!state.selectedCaseId && payload.items.length) {
     state.selectedCaseId = payload.items[0].id;
     loadCaseDetail(state.selectedCaseId, {
       summaryItem: payload.items[0]
@@ -244,6 +267,7 @@ function renderCases(payload) {
   }
 
   caseList.innerHTML = payload.items.map(renderCaseRow).join("");
+  updateActiveCaseRow();
   caseList.querySelectorAll("[data-case-id]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedCaseId = Number(button.dataset.caseId);
@@ -251,7 +275,8 @@ function renderCases(payload) {
       updateActiveCaseRow();
       loadCaseDetail(state.selectedCaseId, {
         summaryItem,
-        focus: true
+        focus: true,
+        updateRoute: true
       }).catch(console.error);
     });
   });
@@ -496,7 +521,7 @@ async function loadCases() {
   renderCases(payload);
 }
 
-async function loadCaseDetail(caseId, { summaryItem = null, focus = false } = {}) {
+async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updateRoute = false } = {}) {
   const requestToken = ++detailRequestToken;
   const cached = getCachedDetail(caseId);
 
@@ -506,6 +531,10 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false } = {}
 
   if (focus) {
     jumpToDetailPanel();
+  }
+
+  if (updateRoute) {
+    setCaseRoute(caseId);
   }
 
   if (cached) {
@@ -597,6 +626,15 @@ if (copyWechatButton) {
 }
 
 async function boot() {
+  const routeCaseId = getRouteCaseId();
+  if (routeCaseId) {
+    state.selectedCaseId = routeCaseId;
+    renderDetailLoading({
+      docket_number: `Case #${routeCaseId}`,
+      case_name: "正在载入案件详情"
+    });
+  }
+
   const [casesResult, statusResult] = await Promise.allSettled([loadCases(), loadStatus()]);
   if (casesResult.status === "rejected") {
     throw casesResult.reason;
@@ -606,10 +644,41 @@ async function boot() {
     console.error(statusResult.reason);
   }
 
+  if (routeCaseId) {
+    const summaryItem = currentCasesPayload?.items?.find((item) => item.id === routeCaseId) || null;
+    loadCaseDetail(routeCaseId, {
+      summaryItem,
+      focus: true
+    }).catch(console.error);
+  }
+
   window.setInterval(() => {
     loadStatus().catch(() => {});
   }, statusPollMs);
 }
+
+window.addEventListener("popstate", () => {
+  const routeCaseId = getRouteCaseId();
+  if (routeCaseId) {
+    state.selectedCaseId = routeCaseId;
+    updateActiveCaseRow();
+    const summaryItem = currentCasesPayload?.items?.find((item) => item.id === routeCaseId) || null;
+    loadCaseDetail(routeCaseId, {
+      summaryItem,
+      focus: true
+    }).catch(console.error);
+    return;
+  }
+
+  if (currentCasesPayload?.items?.length) {
+    state.selectedCaseId = currentCasesPayload.items[0].id;
+    updateActiveCaseRow();
+    loadCaseDetail(state.selectedCaseId, {
+      summaryItem: currentCasesPayload.items[0],
+      focus: true
+    }).catch(console.error);
+  }
+});
 
 boot().catch((error) => {
   console.error(error);

@@ -76,6 +76,38 @@ function formatShanghaiDateKey(value) {
   return shanghaiDateFormatter.format(date);
 }
 
+function buildCaseView(row) {
+  const hydrated = hydrateCase(row);
+  const insights = deriveCaseInsights(hydrated);
+  return {
+    ...hydrated,
+    insights,
+    _created_date_shanghai: formatShanghaiDateKey(hydrated.created_at),
+    _docket_raw: normalizeText(hydrated.docket_number),
+    _docket_normalized: normalizeDocket(hydrated.docket_number),
+    _search_blob: normalizeText([
+      hydrated.case_name,
+      hydrated.case_name_zh,
+      hydrated.docket_number,
+      normalizeDocket(hydrated.docket_number),
+      hydrated.court_name,
+      hydrated.recent_activity_summary,
+      hydrated.recent_activity_summary_zh,
+      insights?.brand_name,
+      insights?.lead_law_firm,
+      ...(hydrated.plaintiffs || []),
+      ...(hydrated.defendants || [])
+    ].join(" | ")),
+    _label_blob: normalizeText([
+      hydrated.case_name,
+      insights?.brand_name,
+      insights?.lead_law_firm,
+      ...(hydrated.plaintiffs || []),
+      ...(hydrated.defendants || [])
+    ].join(" | "))
+  };
+}
+
 function hydrateCase(row) {
   if (!row) {
     return null;
@@ -244,6 +276,7 @@ export class Store {
     this.db = new DatabaseSync(dbPath);
     this.caseCacheVersion = 0;
     this.caseViewCache = new Map();
+    this.dashboardStatsCache = null;
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -346,6 +379,7 @@ export class Store {
   invalidateCaseViews() {
     this.caseCacheVersion += 1;
     this.caseViewCache.clear();
+    this.dashboardStatsCache = null;
   }
 
   getHydratedCases(startDate = "2025-01-01") {
@@ -363,13 +397,7 @@ export class Store {
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
       `)
       .all(cacheKey)
-      .map((row) => {
-        const hydrated = hydrateCase(row);
-        return {
-          ...hydrated,
-          insights: deriveCaseInsights(hydrated)
-        };
-      });
+      .map(buildCaseView);
 
     this.caseViewCache.set(cacheKey, {
       version: this.caseCacheVersion,
@@ -855,6 +883,10 @@ export class Store {
   }
 
   getDashboardStats() {
+    if (this.dashboardStatsCache && this.dashboardStatsCache.version === this.caseCacheVersion) {
+      return this.dashboardStatsCache.value;
+    }
+
     const rows = this.getHydratedCases("2025-01-01");
     const todayKey = formatShanghaiDateKey(new Date());
 
@@ -888,7 +920,7 @@ export class Store {
       `)
       .get();
 
-    return {
+    const value = {
       totals,
       latestCase,
       recentSync: recentSync
@@ -898,6 +930,13 @@ export class Store {
           }
         : null
     };
+
+    this.dashboardStatsCache = {
+      version: this.caseCacheVersion,
+      value
+    };
+
+    return value;
   }
 
   mergeTagMarkers(existing, incoming) {
@@ -951,22 +990,8 @@ export class Store {
   }
 
   matchesSearch(row, searchTerm) {
-    const haystack = normalizeText([
-      row.case_name,
-      row.case_name_zh,
-      row.docket_number,
-      normalizeDocket(row.docket_number),
-      row.court_name,
-      row.recent_activity_summary,
-      row.recent_activity_summary_zh,
-      row.insights?.brand_name,
-      row.insights?.lead_law_firm,
-      ...(row.plaintiffs || []),
-      ...(row.defendants || [])
-    ].join(" | "));
-
     const docketNeedle = normalizeDocket(searchTerm);
-    return haystack.includes(searchTerm) || (docketNeedle && haystack.includes(docketNeedle));
+    return row._search_blob.includes(searchTerm) || (docketNeedle && row._search_blob.includes(docketNeedle));
   }
 
   compareSearchPriority(left, right, searchTerm) {
@@ -993,15 +1018,9 @@ export class Store {
   searchPriority(row, searchTerm) {
     const rawNeedle = String(searchTerm || "").trim();
     const normalizedNeedle = normalizeDocket(rawNeedle);
-    const docketRaw = normalizeText(row.docket_number);
-    const docketNormalized = normalizeDocket(row.docket_number);
-    const labelBlob = normalizeText([
-      row.case_name,
-      row.insights?.brand_name,
-      row.insights?.lead_law_firm,
-      ...(row.plaintiffs || []),
-      ...(row.defendants || [])
-    ].join(" | "));
+    const docketRaw = row._docket_raw;
+    const docketNormalized = row._docket_normalized;
+    const labelBlob = row._label_blob;
 
     let score = 0;
 
