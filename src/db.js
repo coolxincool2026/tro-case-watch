@@ -248,6 +248,11 @@ function compareEntriesForCanonicalRow(left, right) {
 }
 
 function compareEntriesForTimeline(left, right) {
+  const dateCompare = String(right.filed_at || right.created_at).localeCompare(String(left.filed_at || left.created_at));
+  if (dateCompare !== 0) {
+    return dateCompare;
+  }
+
   const leftOrder = parseEntryOrderValue(left);
   const rightOrder = parseEntryOrderValue(right);
   if (leftOrder !== null || rightOrder !== null) {
@@ -255,11 +260,6 @@ function compareEntriesForTimeline(left, right) {
     if (numericCompare !== 0) {
       return numericCompare;
     }
-  }
-
-  const dateCompare = String(right.filed_at || right.created_at).localeCompare(String(left.filed_at || left.created_at));
-  if (dateCompare !== 0) {
-    return dateCompare;
   }
 
   const sourceCompare = entrySourceRank(right) - entrySourceRank(left);
