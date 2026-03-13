@@ -274,6 +274,14 @@ function compareCaseActivityDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
 
+function cloneListPayload(payload = {}) {
+  return {
+    ...payload,
+    items: Array.isArray(payload.items) ? payload.items.map((item) => ({ ...item })) : [],
+    courts: Array.isArray(payload.courts) ? payload.courts.map((court) => ({ ...court })) : []
+  };
+}
+
 export class Store {
   constructor(dbPath) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -281,6 +289,7 @@ export class Store {
     this.caseCacheVersion = 0;
     this.caseViewCache = new Map();
     this.caseDetailCache = new Map();
+    this.listPayloadCache = new Map();
     this.dashboardStatsCache = null;
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -385,6 +394,7 @@ export class Store {
     this.caseCacheVersion += 1;
     this.caseViewCache.clear();
     this.caseDetailCache.clear();
+    this.listPayloadCache.clear();
     this.dashboardStatsCache = null;
   }
 
@@ -654,12 +664,24 @@ export class Store {
     const startDate = filters.startDate || "2025-01-01";
     const pageSize = Math.min(Number(filters.pageSize || 25), 100);
     const page = Math.max(Number(filters.page || 1), 1);
-
-    const rows = this.getHydratedCases(startDate);
-
     const category = filters.category || "seller_watch";
     const searchTerm = normalizeText(filters.search || "");
     const selectedCourt = String(filters.court || "");
+    const cacheKey = JSON.stringify({
+      startDate,
+      pageSize,
+      page,
+      category,
+      searchTerm,
+      selectedCourt
+    });
+
+    const cached = this.listPayloadCache.get(cacheKey);
+    if (cached && cached.version === this.caseCacheVersion) {
+      return cloneListPayload(cached.value);
+    }
+
+    const rows = this.getHydratedCases(startDate);
 
     const categoryFiltered = rows.filter((row) => this.matchesCategory(row, category));
     const searchFiltered = searchTerm
@@ -692,7 +714,7 @@ export class Store {
       (left, right) => right.total - left.total || String(left.court_name).localeCompare(String(right.court_name))
     );
 
-    return {
+    const payload = {
       items,
       total,
       page,
@@ -700,6 +722,13 @@ export class Store {
       pageCount: Math.max(1, Math.ceil(total / pageSize)),
       courts
     };
+
+    this.listPayloadCache.set(cacheKey, {
+      version: this.caseCacheVersion,
+      value: payload
+    });
+
+    return cloneListPayload(payload);
   }
 
   getCase(id) {
