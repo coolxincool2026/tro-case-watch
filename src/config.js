@@ -86,7 +86,7 @@ export const config = {
     minIntervalMs: envInt("WORLDTRO_MIN_INTERVAL_MS", 1500),
     timeoutMs: envInt("WORLDTRO_TIMEOUT_MS", 15000),
     maxCasesPerRun: envInt("WORLDTRO_MAX_CASES_PER_RUN", 3),
-    backfillMaxCasesPerRun: envInt("WORLDTRO_BACKFILL_MAX_CASES_PER_RUN", 12),
+    backfillMaxCasesPerRun: envInt("WORLDTRO_BACKFILL_MAX_CASES_PER_RUN", 30),
     staleAfterHours: envInt("WORLDTRO_STALE_AFTER_HOURS", 12)
   },
   translation: {

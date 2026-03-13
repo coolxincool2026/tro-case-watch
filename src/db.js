@@ -270,6 +270,10 @@ function compareEntriesForTimeline(left, right) {
   return Number(right.id || 0) - Number(left.id || 0);
 }
 
+function compareCaseActivityDesc(left, right) {
+  return String(right || "").localeCompare(String(left || ""));
+}
+
 export class Store {
   constructor(dbPath) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -741,18 +745,83 @@ export class Store {
 
   getCasesNeedingWorldtroSync(limit, staleAfterHours = 12) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
+    const entryCounts = new Map(
+      this.db
+        .prepare(`
+          SELECT
+            case_id,
+            COUNT(*) AS total_entries,
+            SUM(CASE WHEN primary_source = 'worldtro' THEN 1 ELSE 0 END) AS worldtro_entries
+          FROM docket_entries
+          GROUP BY case_id
+        `)
+        .all()
+        .map((row) => [
+          Number(row.case_id),
+          {
+            totalEntries: Number(row.total_entries || 0),
+            worldtroEntries: Number(row.worldtro_entries || 0)
+          }
+        ])
+    );
+
     const rows = this.getHydratedCases("2025-01-01")
-      .filter((row) => {
-        if (!row.insights?.is_seller_case) {
-          return false;
+      .map((row) => {
+        const coverage = entryCounts.get(Number(row.id)) || {
+          totalEntries: 0,
+          worldtroEntries: 0
+        };
+        const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
+        const syncedAt = row.raw?.worldtro?.syncedAt ? Date.parse(row.raw.worldtro.syncedAt) : 0;
+        const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
+        const hasWorldtroUrl = row.source_urls?.some((url) => String(url).includes("worldtro.com"));
+        const hasWorldtroCoverage = hasWorldtroUrl || worldtroRowCount > 0 || coverage.worldtroEntries > 0;
+        const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), 6);
+        const missingMarked = Boolean(row.raw?.worldtro?.missing);
+        const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
+
+        const needsCompletion = worldtroRowCount > 0
+          ? coverage.totalEntries < worldtroRowCount
+          : !hasWorldtroCoverage && coverage.totalEntries < minimumExpectedEntries;
+        const isStale = !syncedAt || syncedAt < staleBefore;
+        const shouldSync = hasCivilDocketNumber && row.insights?.is_seller_case && (
+          needsCompletion ||
+          (!hasWorldtroCoverage && !isFreshlyMissing) ||
+          (hasWorldtroCoverage && isStale)
+        );
+
+        const priority = needsCompletion
+          ? 0
+          : !hasWorldtroCoverage
+            ? 1
+            : 2;
+
+        return {
+          row,
+          priority,
+          shouldSync
+        };
+      })
+      .filter((item) => item.shouldSync)
+      .sort((left, right) => {
+        if (left.priority !== right.priority) {
+          return left.priority - right.priority;
         }
 
-        const syncedAt = row.raw?.worldtro?.syncedAt ? Date.parse(row.raw.worldtro.syncedAt) : 0;
-        const hasWorldtroUrl = row.source_urls?.some((url) => String(url).includes("worldtro.com"));
-        return !hasWorldtroUrl || !syncedAt || syncedAt < staleBefore;
-      });
+        const activityCompare = compareCaseActivityDesc(
+          left.row.latest_docket_filed_at || left.row.date_filed || left.row.updated_at,
+          right.row.latest_docket_filed_at || right.row.date_filed || right.row.updated_at
+        );
+        if (activityCompare !== 0) {
+          return activityCompare;
+        }
 
-    return rows.slice(0, limit);
+        return Number(right.row.id || 0) - Number(left.row.id || 0);
+      })
+      .slice(0, limit)
+      .map((item) => item.row);
+
+    return rows;
   }
 
   getPendingCaseTranslations(limit) {

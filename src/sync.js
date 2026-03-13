@@ -311,6 +311,7 @@ export class CaseSyncService {
     );
 
     let syncedCases = 0;
+    let failedCases = 0;
     for (const caseRow of candidates) {
       try {
         const result = await this.syncSingleWorldtroCase(caseRow);
@@ -318,18 +319,17 @@ export class CaseSyncService {
           syncedCases += 1;
         }
       } catch (error) {
-        return {
-          syncedCases,
-          note: `WorldTRO 补源中止：${error.message}`
-        };
+        failedCases += 1;
       }
     }
 
     return {
       syncedCases,
       note: syncedCases
-        ? `WorldTRO 本轮补齐 ${syncedCases} 个案件的公开时间线。`
-        : "WorldTRO 本轮没有待补源案件。"
+        ? `WorldTRO 本轮补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
+        : failedCases
+          ? `WorldTRO 本轮没有补齐成功，${failedCases} 个案件待重试。`
+          : "WorldTRO 本轮没有待补源案件。"
     };
   }
 
