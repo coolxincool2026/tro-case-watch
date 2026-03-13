@@ -8,6 +8,11 @@ const state = {
   pageCount: 1
 };
 
+const detailCache = new Map();
+const detailCacheTtlMs = 2 * 60 * 1000;
+let currentCasesPayload = null;
+let detailRequestToken = 0;
+
 const caseList = document.querySelector("#case-list");
 const detailPanel = document.querySelector("#detail-panel");
 const heroStats = document.querySelector("#hero-stats");
@@ -65,6 +70,7 @@ function renderHero(status) {
   const cards = [
     heroCard("TRO诉讼/Schedule A案件数", `${totals.tro_cases || 0} / ${totals.schedule_a_cases || 0}`),
     heroCard("卖家相关", totals.seller_cases || 0),
+    heroCard("今日新增收录", totals.today_added_watchlist || 0),
     heroCard(
       "最近同步",
       recentSync?.finished_at
@@ -76,6 +82,30 @@ function renderHero(status) {
   ];
 
   heroStats.innerHTML = cards.join("");
+}
+
+function isDetailPanelVisible() {
+  const rect = detailPanel.getBoundingClientRect();
+  return rect.top < window.innerHeight * 0.8 && rect.bottom > window.innerHeight * 0.2;
+}
+
+function jumpToDetailPanel() {
+  if (!detailPanel) {
+    return;
+  }
+
+  if (!isDetailPanelVisible() || window.innerWidth < 1180) {
+    detailPanel.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+  }
+
+  if (window.location.hash !== "#detail-panel" && window.history?.replaceState) {
+    const url = new URL(window.location.href);
+    url.hash = "detail-panel";
+    window.history.replaceState(null, "", url);
+  }
 }
 
 function revealResultsIfNeeded() {
@@ -172,6 +202,7 @@ function renderCaseRow(item) {
 }
 
 function renderCases(payload) {
+  currentCasesPayload = payload;
   state.pageCount = payload.pageCount || 1;
   renderCourtOptions(payload.courts || []);
 
@@ -207,16 +238,28 @@ function renderCases(payload) {
 
   if (!payload.items.some((item) => item.id === state.selectedCaseId)) {
     state.selectedCaseId = payload.items[0].id;
-    loadCaseDetail(state.selectedCaseId);
+    loadCaseDetail(state.selectedCaseId, {
+      summaryItem: payload.items[0]
+    });
   }
 
   caseList.innerHTML = payload.items.map(renderCaseRow).join("");
   caseList.querySelectorAll("[data-case-id]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedCaseId = Number(button.dataset.caseId);
-      loadCaseDetail(state.selectedCaseId);
-      loadCases();
+      const summaryItem = payload.items.find((item) => item.id === state.selectedCaseId) || null;
+      updateActiveCaseRow();
+      loadCaseDetail(state.selectedCaseId, {
+        summaryItem,
+        focus: true
+      }).catch(console.error);
     });
+  });
+}
+
+function updateActiveCaseRow() {
+  caseList.querySelectorAll("[data-case-id]").forEach((button) => {
+    button.classList.toggle("is-active", Number(button.dataset.caseId) === state.selectedCaseId);
   });
 }
 
@@ -392,6 +435,47 @@ function renderDetail(item) {
   `;
 }
 
+function renderDetailLoading(item = {}) {
+  const docket = item.docket_number || "No docket number";
+  const title = item.case_name || item.insights?.brand_name || "正在载入案件详情";
+  const court = item.court_name || "正在读取法院信息";
+  const filedAt = formatDate(item.date_filed);
+
+  detailPanel.innerHTML = `
+    <div class="panel-head detail-header">
+      <span class="case-docket">${docket}</span>
+      <h3>${title}</h3>
+      <div class="detail-meta">
+        <span>${court}</span>
+        <span>Filed ${filedAt}</span>
+      </div>
+    </div>
+    <div class="detail-empty is-loading">
+      <h3>正在打开 Docket 详细页</h3>
+      <p>已响应你的点击，正在加载该案件的站内时间线。</p>
+    </div>
+  `;
+}
+
+function getCachedDetail(caseId) {
+  const cached = detailCache.get(caseId);
+  if (!cached) {
+    return null;
+  }
+
+  if (Date.now() - cached.cachedAt > detailCacheTtlMs) {
+    detailCache.delete(caseId);
+    return null;
+  }
+
+  return cached.item;
+}
+
+function shouldCacheDetail(item) {
+  const entriesCount = item.entries?.length || 0;
+  return !(item.insights?.badges || []).includes("跨境卖家相关") || entriesCount >= 12;
+}
+
 async function loadStatus() {
   const status = await request("/api/sync/status");
   renderHero(status);
@@ -412,8 +496,39 @@ async function loadCases() {
   renderCases(payload);
 }
 
-async function loadCaseDetail(caseId) {
+async function loadCaseDetail(caseId, { summaryItem = null, focus = false } = {}) {
+  const requestToken = ++detailRequestToken;
+  const cached = getCachedDetail(caseId);
+
+  if (summaryItem) {
+    renderDetailLoading(summaryItem);
+  }
+
+  if (focus) {
+    jumpToDetailPanel();
+  }
+
+  if (cached) {
+    if (requestToken === detailRequestToken) {
+      renderDetail(cached);
+    }
+    return;
+  }
+
   const item = await request(`/api/cases/${caseId}`);
+  if (requestToken !== detailRequestToken) {
+    return;
+  }
+
+  if (shouldCacheDetail(item)) {
+    detailCache.set(caseId, {
+      item,
+      cachedAt: Date.now()
+    });
+  } else {
+    detailCache.delete(caseId);
+  }
+
   renderDetail(item);
 }
 

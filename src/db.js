@@ -56,6 +56,26 @@ function compareIsoDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
 
+const shanghaiDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
+
+function formatShanghaiDateKey(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return shanghaiDateFormatter.format(date);
+}
+
 function hydrateCase(row) {
   if (!row) {
     return null;
@@ -836,12 +856,18 @@ export class Store {
 
   getDashboardStats() {
     const rows = this.getHydratedCases("2025-01-01");
+    const todayKey = formatShanghaiDateKey(new Date());
 
     const totals = {
       total_cases: rows.length,
       tro_cases: rows.filter((row) => row.insights?.is_tro_case).length,
       schedule_a_cases: rows.filter((row) => row.insights?.is_schedule_a_case).length,
-      seller_cases: rows.filter((row) => row.insights?.is_seller_case).length
+      seller_cases: rows.filter((row) => row.insights?.is_seller_case).length,
+      today_added_watchlist: rows.filter(
+        (row) =>
+          formatShanghaiDateKey(row.created_at) === todayKey &&
+          (row.insights?.is_tro_case || row.insights?.is_schedule_a_case || row.insights?.is_seller_case)
+      ).length
     };
 
     const latestCase = this.db

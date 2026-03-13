@@ -304,7 +304,8 @@ function serializePublicStatus(status = {}) {
         total_cases: Number(dashboard.totals?.total_cases || 0),
         tro_cases: Number(dashboard.totals?.tro_cases || 0),
         schedule_a_cases: Number(dashboard.totals?.schedule_a_cases || 0),
-        seller_cases: Number(dashboard.totals?.seller_cases || 0)
+        seller_cases: Number(dashboard.totals?.seller_cases || 0),
+        today_added_watchlist: Number(dashboard.totals?.today_added_watchlist || 0)
       },
       latestCase: dashboard.latestCase
         ? {
@@ -422,12 +423,9 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     if (item.insights?.is_seller_case && (item.entries?.length || 0) < 12) {
-      try {
-        const result = await syncService.enrichCaseWithWorldtro(caseId);
-        if (result.enriched) {
-          item = store.getCase(caseId);
-        }
-      } catch {}
+      setTimeout(() => {
+        syncService.enrichCaseWithWorldtro(caseId).catch(() => {});
+      }, 0);
     }
 
     return sendJson(response, 200, serializePublicCaseDetail(item));
