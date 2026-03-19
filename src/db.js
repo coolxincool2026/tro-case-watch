@@ -387,6 +387,10 @@ export class Store {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (provider, usage_day)
       );
+
+      CREATE INDEX IF NOT EXISTS idx_cases_docket_number ON cases(docket_number);
+      CREATE INDEX IF NOT EXISTS idx_cases_date_filed ON cases(date_filed);
+      CREATE INDEX IF NOT EXISTS idx_docket_entries_case_id ON docket_entries(case_id);
     `);
   }
 
@@ -660,12 +664,49 @@ export class Store {
     this.invalidateCaseViews();
   }
 
+  getFastPathDocketCases(startDate, rawSearch) {
+    const rawNeedle = normalizeText(rawSearch || "");
+    const docketNeedle = normalizeDocket(rawSearch);
+    const numericSuffix = String(rawSearch || "").match(/(\d{4,6})$/)?.[1] || "";
+    const exactNeedles = [...new Set([rawNeedle, docketNeedle].filter(Boolean))];
+    const suffixNeedles = [...new Set([rawNeedle, docketNeedle, numericSuffix].filter(Boolean))];
+    const clauses = [];
+    const params = [startDate];
+
+    for (const needle of exactNeedles) {
+      clauses.push("lower(docket_number) = ?");
+      params.push(needle);
+    }
+
+    for (const needle of suffixNeedles) {
+      clauses.push("lower(docket_number) LIKE ?");
+      params.push(`%${needle}`);
+    }
+
+    if (!clauses.length) {
+      return [];
+    }
+
+    return this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date(?)
+          AND (${clauses.join(" OR ")})
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        LIMIT 250
+      `)
+      .all(...params)
+      .map(buildCaseView);
+  }
+
   listCases(filters = {}) {
     const startDate = filters.startDate || "2025-01-01";
     const pageSize = Math.min(Number(filters.pageSize || 25), 100);
     const page = Math.max(Number(filters.page || 1), 1);
     const category = filters.category || "seller_watch";
-    const searchTerm = normalizeText(filters.search || "");
+    const rawSearch = String(filters.search || "").trim();
+    const searchTerm = normalizeText(rawSearch);
     const selectedCourt = String(filters.court || "");
     const cacheKey = JSON.stringify({
       startDate,
@@ -681,7 +722,9 @@ export class Store {
       return cloneListPayload(cached.value);
     }
 
-    const rows = this.getHydratedCases(startDate);
+    const rows = looksLikeDocketSearch(rawSearch)
+      ? this.getFastPathDocketCases(startDate, rawSearch)
+      : this.getHydratedCases(startDate);
 
     const categoryFiltered = rows.filter((row) => this.matchesCategory(row, category));
     const searchFiltered = searchTerm
