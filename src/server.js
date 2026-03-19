@@ -250,19 +250,6 @@ function redirectToWww(request, response) {
   response.end();
 }
 
-function shouldRedirectCustomApi(hostname, pathname) {
-  return hostname === "www.trotracker.com" && pathname.startsWith("/api/");
-}
-
-function redirectCustomApi(url, response) {
-  const target = `https://tro-case-watch-production.up.railway.app${url.pathname}${url.search}`;
-  response.writeHead(307, {
-    location: target,
-    "cache-control": "no-store"
-  });
-  response.end();
-}
-
 async function readRequestBody(request) {
   const chunks = [];
   for await (const chunk of request) {
@@ -713,10 +700,6 @@ const server = http.createServer(async (request, response) => {
     }
 
     const url = new URL(request.url, `http://${request.headers.host}`);
-    if (shouldRedirectCustomApi(hostname, url.pathname)) {
-      redirectCustomApi(url, response);
-      return;
-    }
 
     if (url.pathname.startsWith("/api/")) {
       response.setHeader("access-control-allow-origin", buildApiHeaders(request.headers.origin || "")["access-control-allow-origin"] || "");

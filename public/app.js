@@ -30,8 +30,7 @@ const refreshButton = document.querySelector("#refresh-button");
 const contentGrid = document.querySelector(".content-grid");
 const copyWechatButton = document.querySelector("#copy-wechat-button");
 const statusPollMs = 5 * 60 * 1000;
-const apiBase =
-  window.location.hostname === "www.trotracker.com" ? "https://tro-case-watch-production.up.railway.app" : "";
+const apiBase = "";
 
 function getRouteCaseId() {
   const match = window.location.pathname.match(caseRoutePattern);
