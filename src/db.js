@@ -1046,9 +1046,13 @@ export class Store {
       return new Map();
     }
 
-    const placeholders = ids.map(() => "?").join(", ");
-    return new Map(
-      this.db
+    const chunkSize = 900;
+    const coverage = new Map();
+
+    for (let index = 0; index < ids.length; index += chunkSize) {
+      const chunk = ids.slice(index, index + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = this.db
         .prepare(`
           SELECT
             case_id,
@@ -1059,33 +1063,67 @@ export class Store {
           WHERE case_id IN (${placeholders})
           GROUP BY case_id
         `)
-        .all(...ids)
-        .map((row) => [
-          Number(row.case_id),
-          {
-            totalEntries: Number(row.total_entries || 0),
-            worldtroEntries: Number(row.worldtro_entries || 0),
-            pacermonitorEntries: Number(row.pacermonitor_entries || 0)
-          }
-        ])
-    );
+        .all(...chunk);
+
+      for (const row of rows) {
+        coverage.set(Number(row.case_id), {
+          totalEntries: Number(row.total_entries || 0),
+          worldtroEntries: Number(row.worldtro_entries || 0),
+          pacermonitorEntries: Number(row.pacermonitor_entries || 0)
+        });
+      }
+    }
+
+    return coverage;
   }
 
   getCasesNeedingWorldtroSync(limit, staleAfterHours = 12) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
-    const candidatePoolSize = Math.max(limit * 120, 400);
+    const poolSize = Math.max(limit * 12, 180);
+    const fetchCandidateRows = (whereSql, params = [], orderBySql, queryLimit = poolSize) =>
+      this.db
+        .prepare(`
+          SELECT *
+          FROM cases
+          WHERE date(date_filed) >= date(?)
+            AND tags_marker LIKE '%|seller_tro|%'
+            AND ${whereSql}
+          ORDER BY ${orderBySql}
+          LIMIT ?
+        `)
+        .all("2025-01-01", ...params, queryLimit)
+        .map(hydrateCase);
 
-    const candidateRows = this.db
-      .prepare(`
-        SELECT *
-        FROM cases
-        WHERE date(date_filed) >= date('2025-01-01')
-          AND tags_marker LIKE '%|seller_tro|%'
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
-        LIMIT ?
-      `)
-      .all(candidatePoolSize)
-      .map(buildCaseView);
+    const recentRows = fetchCandidateRows(
+      `date(COALESCE(latest_docket_filed_at, date_filed, updated_at)) >= date('now', '-45 day')`,
+      [],
+      `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC`,
+      Math.max(poolSize, limit * 8)
+    );
+    const knownWorldtroRows = fetchCandidateRows(
+      `(source_urls_json LIKE '%worldtro.com%' OR raw_json LIKE '%"worldtro"%')`,
+      [],
+      `COALESCE(latest_docket_filed_at, date_filed, updated_at) ASC, id ASC`,
+      Math.max(limit * 8, 120)
+    );
+    const sparseRows = fetchCandidateRows(
+      `docket_count <= ?`,
+      [4],
+      `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC`,
+      Math.max(limit * 8, 120)
+    );
+
+    const candidateRows = [];
+    const seenCandidateIds = new Set();
+    for (const row of [...recentRows, ...knownWorldtroRows, ...sparseRows]) {
+      if (seenCandidateIds.has(row.id)) {
+        continue;
+      }
+
+      seenCandidateIds.add(row.id);
+      candidateRows.push(row);
+    }
+
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
 
     const rows = candidateRows
@@ -1098,53 +1136,102 @@ export class Store {
         const syncedAt = row.raw?.worldtro?.syncedAt ? Date.parse(row.raw.worldtro.syncedAt) : 0;
         const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
         const hasWorldtroUrl = row.source_urls?.some((url) => String(url).includes("worldtro.com"));
-        const hasWorldtroCoverage = hasWorldtroUrl || worldtroRowCount > 0 || coverage.worldtroEntries > 0;
+        const hasWorldtroEntries = worldtroRowCount > 0 || coverage.worldtroEntries > 0;
+        const hasKnownWorldtroSource = hasWorldtroUrl || hasWorldtroEntries;
         const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), 6);
         const missingMarked = Boolean(row.raw?.worldtro?.missing);
         const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
 
         const needsCompletion = worldtroRowCount > 0
           ? coverage.totalEntries < worldtroRowCount
-          : !hasWorldtroCoverage && coverage.totalEntries < minimumExpectedEntries;
+          : hasWorldtroUrl
+            ? coverage.worldtroEntries === 0 || coverage.totalEntries < minimumExpectedEntries
+            : !hasKnownWorldtroSource && coverage.totalEntries < minimumExpectedEntries;
         const isStale = !syncedAt || syncedAt < staleBefore;
-        const shouldSync = hasCivilDocketNumber && row.insights?.is_seller_case && (
+        const shouldSync = hasCivilDocketNumber && (
           needsCompletion ||
-          (!hasWorldtroCoverage && !isFreshlyMissing) ||
-          (hasWorldtroCoverage && isStale)
+          (!hasKnownWorldtroSource && !isFreshlyMissing) ||
+          (hasKnownWorldtroSource && isStale)
         );
+        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
 
         const priority = needsCompletion
-          ? 0
-          : !hasWorldtroCoverage
-            ? 1
-            : 2;
+          ? hasWorldtroUrl
+            ? 0
+            : 1
+          : !hasKnownWorldtroSource
+            ? 2
+            : 3;
 
         return {
           row,
           priority,
-          shouldSync
+          shouldSync,
+          totalEntries: coverage.totalEntries,
+          hasWorldtroCoverage: hasKnownWorldtroSource,
+          hasWorldtroUrl,
+          activityAtRaw
         };
       })
-      .filter((item) => item.shouldSync)
-      .sort((left, right) => {
-        if (left.priority !== right.priority) {
-          return left.priority - right.priority;
+      .filter((item) => item.shouldSync);
+
+    const recentOrdered = rows.slice().sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+
+      const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+      if (activityCompare !== 0) {
+        return activityCompare;
+      }
+
+      return Number(right.row.id || 0) - Number(left.row.id || 0);
+    });
+
+    const backlogOrdered = rows.slice().sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+
+      if (left.hasWorldtroUrl !== right.hasWorldtroUrl) {
+        return left.hasWorldtroUrl ? -1 : 1;
+      }
+
+      if (left.hasWorldtroCoverage !== right.hasWorldtroCoverage) {
+        return left.hasWorldtroCoverage ? 1 : -1;
+      }
+
+      const olderActivityCompare = String(left.activityAtRaw || "").localeCompare(String(right.activityAtRaw || ""));
+      if (olderActivityCompare !== 0) {
+        return olderActivityCompare;
+      }
+
+      if (left.totalEntries !== right.totalEntries) {
+        return left.totalEntries - right.totalEntries;
+      }
+
+      return Number(left.row.id || 0) - Number(right.row.id || 0);
+    });
+
+    const recentSlots = Math.max(1, Math.ceil(limit * 0.65));
+    const selected = [];
+    const seen = new Set();
+    const appendRows = (items, maxItems = limit) => {
+      for (const item of items) {
+        if (selected.length >= maxItems || seen.has(item.row.id)) {
+          continue;
         }
 
-        const activityCompare = compareCaseActivityDesc(
-          left.row.latest_docket_filed_at || left.row.date_filed || left.row.updated_at,
-          right.row.latest_docket_filed_at || right.row.date_filed || right.row.updated_at
-        );
-        if (activityCompare !== 0) {
-          return activityCompare;
-        }
+        seen.add(item.row.id);
+        selected.push(item.row);
+      }
+    };
 
-        return Number(right.row.id || 0) - Number(left.row.id || 0);
-      })
-      .slice(0, limit)
-      .map((item) => item.row);
+    appendRows(recentOrdered, recentSlots);
+    appendRows(backlogOrdered, limit);
+    appendRows(recentOrdered, limit);
 
-    return rows;
+    return selected.slice(0, limit);
   }
 
   getCasesNeedingPacerMonitorSync(

@@ -669,6 +669,18 @@ async function handleApi(request, response, pathname, searchParams) {
       }
     }
 
+    if (filters.search && payload.items?.length) {
+      const exactDocketLookup = docketLooksLike(filters.search) || looksLikeDocketFragment(filters.search);
+      if (exactDocketLookup) {
+        payload.items.slice(0, 3).forEach((item) => {
+          const detail = store.getCase(item.id);
+          if (detail) {
+            queueCaseHydration(item.id, detail);
+          }
+        });
+      }
+    }
+
     return sendJson(response, 200, serializePublicCasesPayload(payload));
   }
 
