@@ -68,6 +68,8 @@ export const config = {
     enableScheduler: envBool("ENABLE_SCHEDULER", true),
     enableBackfillScheduler: envBool("ENABLE_BACKFILL_SCHEDULER", true),
     bootstrapSync: envBool("BOOTSTRAP_SYNC", true),
+    bootstrapSyncDelayMs: envInt("BOOTSTRAP_SYNC_DELAY_MS", 30 * 1000),
+    bootstrapBackfillDelayMs: envInt("BOOTSTRAP_BACKFILL_DELAY_MS", 60 * 1000),
     startDate: env("START_DATE", "2025-01-01"),
     pollIntervalMs: envInt("POLL_INTERVAL_MS", 30 * 60 * 1000),
     backfillIntervalMs: envInt("BACKFILL_INTERVAL_MS", 60 * 60 * 1000),

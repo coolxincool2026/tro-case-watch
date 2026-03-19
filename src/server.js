@@ -29,7 +29,7 @@ const mimeTypes = {
 
 ensureSeedDatabase();
 
-const store = new Store(config.dbPath);
+const store = createStoreWithRecovery();
 const courtListener = new CourtListenerClient(config.courtListener);
 const worldtro = new WorldtroClient(config.worldtro);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
@@ -55,11 +55,79 @@ function ensureSeedDatabase() {
     return;
   }
 
+  restoreSeedDatabase(shouldRestore.reason);
+}
+
+function createStoreWithRecovery() {
+  try {
+    return new Store(config.dbPath);
+  } catch (error) {
+    if (!isRecoverableSqliteError(error) || !config.seedDbArchivePath || !fs.existsSync(config.seedDbArchivePath)) {
+      throw error;
+    }
+
+    console.error(`[bootstrap-db] store open failed, attempting seed restore (${error.message})`);
+    restoreSeedDatabase(`store-open-failed:${error.code || "unknown"}`);
+    return new Store(config.dbPath);
+  }
+}
+
+function isRecoverableSqliteError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    error?.code === "ERR_SQLITE_ERROR" &&
+    (message.includes("malformed") || message.includes("disk image") || message.includes("not a database"))
+  );
+}
+
+function restoreSeedDatabase(reason = "manual") {
   fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
+  cleanupDatabaseFiles(config.dbPath, { includePrimary: true });
+
   const archive = fs.readFileSync(config.seedDbArchivePath);
   const dbBuffer = zlib.gunzipSync(archive);
-  fs.writeFileSync(config.dbPath, dbBuffer);
-  console.log(`[bootstrap-db] restored seed database from ${config.seedDbArchivePath} (${shouldRestore.reason})`);
+  const tempPath = `${config.dbPath}.restore-${Date.now()}.tmp`;
+  fs.writeFileSync(tempPath, dbBuffer);
+  verifyDatabase(tempPath, config.seedDbMinimumCases);
+  fs.renameSync(tempPath, config.dbPath);
+  cleanupDatabaseFiles(config.dbPath, { includePrimary: false });
+  verifyDatabase(config.dbPath, config.seedDbMinimumCases);
+  console.log(`[bootstrap-db] restored seed database from ${config.seedDbArchivePath} (${reason})`);
+}
+
+function cleanupDatabaseFiles(dbPath, { includePrimary = false } = {}) {
+  const targets = includePrimary ? [dbPath] : [];
+  targets.push(`${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`);
+
+  for (const target of targets) {
+    try {
+      if (fs.existsSync(target)) {
+        fs.rmSync(target, { force: true });
+      }
+    } catch (error) {
+      console.warn(`[bootstrap-db] could not remove ${target}: ${error.message}`);
+    }
+  }
+}
+
+function verifyDatabase(dbPath, minimumCases = 0) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const integrity = db.prepare("PRAGMA integrity_check").get();
+    if (String(integrity?.integrity_check || "").toLowerCase() !== "ok") {
+      throw new Error(`seed-integrity-failed:${integrity?.integrity_check || "unknown"}`);
+    }
+
+    if (minimumCases > 0) {
+      const row = db.prepare("SELECT COUNT(*) AS total FROM cases").get();
+      const total = Number(row?.total || 0);
+      if (total < minimumCases) {
+        throw new Error(`seed-too-small:${total}`);
+      }
+    }
+  } finally {
+    db.close();
+  }
 }
 
 function needsSeedRestore() {
@@ -74,6 +142,12 @@ function needsSeedRestore() {
 
   try {
     const db = new DatabaseSync(config.dbPath, { readOnly: true });
+    const integrity = db.prepare("PRAGMA integrity_check").get();
+    if (String(integrity?.integrity_check || "").toLowerCase() !== "ok") {
+      db.close();
+      return { restore: true, reason: `db-integrity:${integrity?.integrity_check || "unknown"}` };
+    }
+
     const row = db.prepare("SELECT COUNT(*) AS total FROM cases").get();
     db.close();
     const total = Number(row?.total || 0);
@@ -583,9 +657,11 @@ async function main() {
   });
 
   if (config.sync.bootstrapSync) {
-    syncService.run("recent").catch((error) => {
-      console.error("[bootstrap-sync]", error.message, error.body || "");
-    });
+    setTimeout(() => {
+      syncService.run("recent").catch((error) => {
+        console.error("[bootstrap-sync]", error.message, error.body || "");
+      });
+    }, config.sync.bootstrapSyncDelayMs);
   }
 
   if (config.sync.enableScheduler) {
@@ -601,7 +677,7 @@ async function main() {
       syncService.run("backfill").catch((error) => {
         console.error("[bootstrap-backfill]", error.message, error.body || "");
       });
-    }, 20_000);
+    }, config.sync.bootstrapBackfillDelayMs);
 
     setInterval(() => {
       if (!syncService.getBackfillStatus().pending) {
