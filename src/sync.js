@@ -1095,6 +1095,42 @@ export class CaseSyncService {
     return this.syncSingleWorldtroCase(caseRow);
   }
 
+  async enrichCaseWithCourtListener(caseId, { force = false } = {}) {
+    const caseRow = this.store.getCase(caseId);
+    if (!caseRow || !this.courtListener.hasDocketAccess()) {
+      return { enriched: false, reason: "not-applicable" };
+    }
+
+    const syncedAt = caseRow.last_docket_sync_at ? Date.parse(caseRow.last_docket_sync_at) : 0;
+    const staleAfterMs = 2 * 60 * 60 * 1000;
+    if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+      return { enriched: false, reason: "fresh" };
+    }
+
+    const lookupTerm = caseRow.docket_number || caseRow.case_name;
+    if (lookupTerm) {
+      await this.importLookup(lookupTerm, {
+        courtName: caseRow.court_name,
+        caseName: caseRow.case_name
+      });
+    }
+
+    const refreshedCase =
+      this.store.getCase(caseId) ||
+      this.store.findCaseByCourtAndDocket({
+        courtId: caseRow.court_id,
+        courtName: caseRow.court_name,
+        docketNumber: caseRow.docket_number,
+        startDate: this.config.sync.startDate
+      });
+
+    if (!refreshedCase?.courtlistener_docket_id) {
+      return { enriched: false, reason: "not-found" };
+    }
+
+    return this.syncSingleCourtListenerDocket(refreshedCase);
+  }
+
   async enrichCaseWithPacerMonitor(caseId, { force = false } = {}) {
     const caseRow = this.store.getCase(caseId);
     if (!caseRow || !this.pacerMonitor.enabled) {
@@ -1579,70 +1615,14 @@ export class CaseSyncService {
     let metadataOnlyMode = false;
 
     for (const caseRow of candidates) {
-      const docketId = caseRow.courtlistener_docket_id;
-      if (!docketId) {
-        continue;
-      }
-
       try {
-        const docket = await this.courtListener.fetchDocket(docketId);
-        const entries = await this.courtListener.fetchDocketEntries(docketId);
-        if (!entries.length && !this.courtListener.hasDocketEntriesAccess()) {
+        const result = await this.syncSingleCourtListenerDocket(caseRow);
+        if (result.enriched) {
+          syncedCases += 1;
+        }
+        if (result.reason === "metadata-only") {
           metadataOnlyMode = true;
         }
-
-        this.store.upsertCase({
-          source_case_key: caseRow.source_case_key,
-          primary_source: "courtlistener",
-          source_case_id: caseRow.source_case_id,
-          courtlistener_docket_id: docketId,
-          pacer_case_id: valueOf(docket.pacer_case_id, caseRow.pacer_case_id),
-          court_id: valueOf(docket.court_id, caseRow.court_id),
-          court_name: valueOf(docket.court_name, caseRow.court_name, docket.court),
-          case_name: valueOf(docket.case_name, docket.caseName, caseRow.case_name),
-          docket_number: valueOf(docket.docket_number, docket.docketNumber, caseRow.docket_number),
-          date_filed: valueOf(docket.date_filed, docket.dateFiled, caseRow.date_filed),
-          date_terminated: valueOf(docket.date_terminated, docket.dateTerminated, caseRow.date_terminated),
-          cause: valueOf(docket.cause, caseRow.cause),
-          nature_of_suit: valueOf(docket.nature_of_suit, docket.natureOfSuit, caseRow.nature_of_suit),
-          status: valueOf(docket.date_terminated, docket.dateTerminated) ? "terminated" : caseRow.status,
-          tags_marker: caseRow.tags_marker,
-          docket_url: valueOf(this.courtListener.absoluteUrl(docket.absolute_url), caseRow.docket_url),
-          source_urls: caseRow.source_urls || [],
-          plaintiffs: caseRow.plaintiffs || [],
-          defendants: caseRow.defendants || [],
-          recent_activity_summary: caseRow.recent_activity_summary,
-          latest_docket_filed_at: valueOf(docket.date_last_filing, caseRow.latest_docket_filed_at),
-          latest_docket_number: caseRow.latest_docket_number,
-          docket_count: Math.max(caseRow.docket_count || 0, entries.length),
-          last_seen_at: new Date().toISOString(),
-          last_synced_at: new Date().toISOString(),
-          last_docket_sync_at: new Date().toISOString(),
-          raw: docket
-        });
-
-        for (const entry of entries) {
-          this.store.upsertDocketEntry({
-            case_id: caseRow.id,
-            source_entry_key: `courtlistener:docket-entry:${entry.id ?? `${docketId}:${entry.entry_number ?? entry.document_number ?? Date.now()}`}`,
-            primary_source: "courtlistener",
-            source_entry_id: valueOf(entry.id),
-            document_type: valueOf(entry.document_type, entry.documentType),
-            entry_number: valueOf(entry.entry_number, entry.entryNumber),
-            document_number: valueOf(entry.document_number, entry.documentNumber),
-            filed_at: valueOf(entry.date_filed, entry.entry_date_filed, entry.filed_at),
-            description: valueOf(entry.description, entry.short_description, entry.docket_text, entry.text),
-            absolute_url: this.courtListener.absoluteUrl(valueOf(entry.absolute_url)),
-            is_available: entry.is_available === undefined ? null : entry.is_available ? 1 : 0,
-            page_count: valueOf(entry.page_count),
-            pacer_doc_id: valueOf(entry.pacer_doc_id),
-            raw: entry,
-            last_synced_at: new Date().toISOString()
-          });
-        }
-
-        this.store.touchCaseDocketSync(caseRow.id);
-        syncedCases += 1;
       } catch (error) {
         return {
           syncedCases,
@@ -1658,6 +1638,74 @@ export class CaseSyncService {
         : syncedCases
           ? `CourtListener docket API 本轮补齐 ${syncedCases} 个案件。`
           : "CourtListener docket API 已启用，但本轮没有待补齐案件。"
+    };
+  }
+
+  async syncSingleCourtListenerDocket(caseRow) {
+    const docketId = caseRow.courtlistener_docket_id;
+    if (!docketId) {
+      return { enriched: false, reason: "not-found" };
+    }
+
+    const docket = await this.courtListener.fetchDocket(docketId);
+    const entries = await this.courtListener.fetchDocketEntries(docketId);
+    const metadataOnlyMode = !entries.length && !this.courtListener.hasDocketEntriesAccess();
+
+    this.store.upsertCase({
+      source_case_key: caseRow.source_case_key,
+      primary_source: "courtlistener",
+      source_case_id: caseRow.source_case_id,
+      courtlistener_docket_id: docketId,
+      pacer_case_id: valueOf(docket.pacer_case_id, caseRow.pacer_case_id),
+      court_id: valueOf(docket.court_id, caseRow.court_id),
+      court_name: valueOf(docket.court_name, caseRow.court_name, docket.court),
+      case_name: valueOf(docket.case_name, docket.caseName, caseRow.case_name),
+      docket_number: valueOf(docket.docket_number, docket.docketNumber, caseRow.docket_number),
+      date_filed: valueOf(docket.date_filed, docket.dateFiled, caseRow.date_filed),
+      date_terminated: valueOf(docket.date_terminated, docket.dateTerminated, caseRow.date_terminated),
+      cause: valueOf(docket.cause, caseRow.cause),
+      nature_of_suit: valueOf(docket.nature_of_suit, docket.natureOfSuit, caseRow.nature_of_suit),
+      status: valueOf(docket.date_terminated, docket.dateTerminated) ? "terminated" : caseRow.status,
+      tags_marker: caseRow.tags_marker,
+      docket_url: valueOf(this.courtListener.absoluteUrl(docket.absolute_url), caseRow.docket_url),
+      source_urls: caseRow.source_urls || [],
+      plaintiffs: caseRow.plaintiffs || [],
+      defendants: caseRow.defendants || [],
+      recent_activity_summary: caseRow.recent_activity_summary,
+      latest_docket_filed_at: valueOf(docket.date_last_filing, caseRow.latest_docket_filed_at),
+      latest_docket_number: caseRow.latest_docket_number,
+      docket_count: Math.max(caseRow.docket_count || 0, entries.length),
+      last_seen_at: new Date().toISOString(),
+      last_synced_at: new Date().toISOString(),
+      last_docket_sync_at: new Date().toISOString(),
+      raw: docket
+    });
+
+    for (const entry of entries) {
+      this.store.upsertDocketEntry({
+        case_id: caseRow.id,
+        source_entry_key: `courtlistener:docket-entry:${entry.id ?? `${docketId}:${entry.entry_number ?? entry.document_number ?? Date.now()}`}`,
+        primary_source: "courtlistener",
+        source_entry_id: valueOf(entry.id),
+        document_type: valueOf(entry.document_type, entry.documentType),
+        entry_number: valueOf(entry.entry_number, entry.entryNumber),
+        document_number: valueOf(entry.document_number, entry.documentNumber),
+        filed_at: valueOf(entry.date_filed, entry.entry_date_filed, entry.filed_at),
+        description: valueOf(entry.description, entry.short_description, entry.docket_text, entry.text),
+        absolute_url: this.courtListener.absoluteUrl(valueOf(entry.absolute_url)),
+        is_available: entry.is_available === undefined ? null : entry.is_available ? 1 : 0,
+        page_count: valueOf(entry.page_count),
+        pacer_doc_id: valueOf(entry.pacer_doc_id),
+        raw: entry,
+        last_synced_at: new Date().toISOString()
+      });
+    }
+
+    this.store.touchCaseDocketSync(caseRow.id);
+
+    return {
+      enriched: true,
+      reason: metadataOnlyMode ? "metadata-only" : entries.length ? "ok" : "empty"
     };
   }
 }

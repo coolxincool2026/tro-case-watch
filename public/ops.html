@@ -280,7 +280,7 @@
         <p class="subtitle">
           这个页面专门用来后台触发补数，不需要再靠 SSH 挂着跑。填一次
           <code>ADMIN_TOKEN</code> 后，可以直接点按钮触发
-          <code>WorldTRO</code>、法院官方源和律所官网补源。
+          <code>CourtListener 官方 docket</code>、<code>WorldTRO</code>、法院官方源和律所官网补源。
         </p>
       </section>
 
@@ -301,6 +301,9 @@
             </button>
             <button data-endpoint="/api/admin/pacermonitor-sync" type="button">
               跑 PACERMonitor
+            </button>
+            <button data-endpoint="/api/admin/courtlistener-docket-sync" type="button">
+              跑 CourtListener Docket
             </button>
             <button data-endpoint="/api/admin/court-feed-sync" type="button">
               跑法院源
@@ -522,7 +525,7 @@
 
         await trigger("/api/admin/enrich-case", {
           search,
-          providers: ["worldtro", "pacermonitor"]
+          providers: ["courtlistener", "worldtro", "pacermonitor"]
         });
       }
 

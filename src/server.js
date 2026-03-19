@@ -799,6 +799,21 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/courtlistener-docket-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    syncService
+      .syncCourtListenerDockets()
+      .catch((error) => console.error("[courtlistener-docket-sync]", error.message, error.body || ""));
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "courtlistener-docket-sync"
+    });
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/court-feed-sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
@@ -835,8 +850,14 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     const body = await readRequestBody(request);
-    const requestedProviders = Array.isArray(body.providers) ? body.providers : ["worldtro", "pacermonitor"];
-    const providers = [...new Set(requestedProviders.filter((item) => item === "worldtro" || item === "pacermonitor"))];
+    const requestedProviders = Array.isArray(body.providers)
+      ? body.providers
+      : ["courtlistener", "worldtro", "pacermonitor"];
+    const providers = [...new Set(
+      requestedProviders.filter((item) =>
+        item === "courtlistener" || item === "worldtro" || item === "pacermonitor"
+      )
+    )];
 
     let item = Number(body.caseId) > 0 ? store.getCase(Number(body.caseId)) : null;
     if (!item && body.search) {
@@ -857,6 +878,10 @@ async function handleApi(request, response, pathname, searchParams) {
 
     Promise.resolve()
       .then(async () => {
+        if (providers.includes("courtlistener")) {
+          await syncService.enrichCaseWithCourtListener(item.id, { force: true });
+        }
+
         if (providers.includes("worldtro")) {
           await syncService.enrichCaseWithWorldtro(item.id, { force: true });
         }
