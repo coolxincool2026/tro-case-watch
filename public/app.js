@@ -16,6 +16,7 @@ let casesRequestToken = 0;
 let detailRefreshTimer = null;
 const inflightDetailRequests = new Map();
 const caseRoutePattern = /^\/case\/(\d+)\/?$/;
+let latestStatusPayload = null;
 
 const caseList = document.querySelector("#case-list");
 const detailPanel = document.querySelector("#detail-panel");
@@ -90,9 +91,11 @@ function heroCard(label, value) {
 }
 
 function renderHero(status) {
+  latestStatusPayload = status;
   const totals = status.dashboard?.totals || {};
   const recentSync = status.dashboard?.recentSync;
   const cards = [
+    heroCard("站内总库/当前监控池", `${totals.total_cases || 0} / ${totals.watchlist_cases || 0}`),
     heroCard("TRO诉讼/Schedule A案件数", `${totals.tro_cases || 0} / ${totals.schedule_a_cases || 0}`),
     heroCard("卖家相关", totals.seller_cases || 0),
     heroCard("今日新增收录", totals.today_added_watchlist || 0),
@@ -241,7 +244,17 @@ function renderCases(payload) {
   state.pageCount = payload.pageCount || 1;
   renderCourtOptions(payload.courts || []);
 
-  const messages = [`共 ${payload.total} 个案件，当前第 ${payload.page} / ${payload.pageCount} 页`];
+  const messages = [];
+  if (!state.search) {
+    const totalCases = Number(latestStatusPayload?.dashboard?.totals?.total_cases || 0);
+    messages.push(`当前监控池共 ${payload.total} 个案件`);
+    if (totalCases > 0) {
+      messages.push(`站内总库共 ${totalCases} 个案件`);
+    }
+    messages.push(`当前第 ${payload.page} / ${payload.pageCount} 页`);
+  } else {
+    messages.push(`命中 ${payload.total} 个案件，当前第 ${payload.page} / ${payload.pageCount} 页`);
+  }
   if (payload.categoryRelaxed) {
     messages.push("已优先返回精确案号匹配结果");
   }

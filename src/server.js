@@ -544,6 +544,7 @@ function serializePublicStatus(status = {}) {
     dashboard: {
       totals: {
         total_cases: Number(dashboard.totals?.total_cases || 0),
+        watchlist_cases: Number(dashboard.totals?.watchlist_cases || 0),
         tro_cases: Number(dashboard.totals?.tro_cases || 0),
         schedule_a_cases: Number(dashboard.totals?.schedule_a_cases || 0),
         seller_cases: Number(dashboard.totals?.seller_cases || 0),

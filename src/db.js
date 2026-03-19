@@ -1621,6 +1621,15 @@ export class Store {
       .prepare(`
         SELECT
           COUNT(*) AS total_cases,
+          SUM(
+            CASE
+              WHEN tags_marker LIKE '%|tro|%'
+                OR tags_marker LIKE '%|schedule_a|%'
+                OR tags_marker LIKE '%|seller_tro|%'
+              THEN 1
+              ELSE 0
+            END
+          ) AS watchlist_cases,
           SUM(CASE WHEN tags_marker LIKE '%|tro|%' THEN 1 ELSE 0 END) AS tro_cases,
           SUM(CASE WHEN tags_marker LIKE '%|schedule_a|%' THEN 1 ELSE 0 END) AS schedule_a_cases,
           SUM(CASE WHEN tags_marker LIKE '%|seller_tro|%' THEN 1 ELSE 0 END) AS seller_cases,
@@ -1642,6 +1651,7 @@ export class Store {
       .get(todayBounds.startIso, todayBounds.endIso, "2025-01-01");
     const totals = {
       total_cases: Number(totalsRow?.total_cases || 0),
+      watchlist_cases: Number(totalsRow?.watchlist_cases || 0),
       tro_cases: Number(totalsRow?.tro_cases || 0),
       schedule_a_cases: Number(totalsRow?.schedule_a_cases || 0),
       seller_cases: Number(totalsRow?.seller_cases || 0),
