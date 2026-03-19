@@ -35,7 +35,7 @@ function normalizeSourceUrl(value) {
 
   try {
     const url = new URL(raw);
-    if (url.hostname.includes("worldtro.com")) {
+    if (url.hostname.includes("worldtro.com") || url.hostname.includes("pacermonitor.com")) {
       url.search = "";
       url.hash = "";
       return url.toString();
@@ -194,6 +194,10 @@ function parseEntryOrderValue(entry) {
 }
 
 function entrySourceRank(entry) {
+  if (entry.primary_source === "pacermonitor") {
+    return 3;
+  }
+
   if (entry.primary_source === "worldtro") {
     return 2;
   }

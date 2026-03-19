@@ -295,6 +295,27 @@ export class CaseSyncService {
     return this.syncSingleWorldtroCase(caseRow);
   }
 
+  async enrichCaseWithPacerMonitor(caseId, { force = false } = {}) {
+    const caseRow = this.store.getCase(caseId);
+    if (!caseRow || !this.pacerMonitor.enabled) {
+      return { enriched: false, reason: "not-applicable" };
+    }
+
+    const syncedAt = caseRow.raw?.pacermonitor?.syncedAt ? Date.parse(caseRow.raw.pacermonitor.syncedAt) : 0;
+    const state = String(caseRow.raw?.pacermonitor?.state || "").toLowerCase();
+    const retryHours =
+      state === "challenge" || state === "rate_limited"
+        ? this.config.pacerMonitor.blockedRetryAfterHours
+        : this.config.pacerMonitor.staleAfterHours;
+    const staleAfterMs = retryHours * 60 * 60 * 1000;
+
+    if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+      return { enriched: false, reason: "fresh" };
+    }
+
+    return this.syncSinglePacerMonitorCase(caseRow);
+  }
+
   async syncWorldtroRecent(mode = "recent") {
     if (!this.worldtro.enabled) {
       return {
@@ -448,6 +469,97 @@ export class CaseSyncService {
         pacer_doc_id: null,
         raw: entry,
         last_synced_at: new Date().toISOString()
+      });
+    }
+
+    return {
+      enriched: true,
+      entries: payload.entries.length,
+      url: payload.url
+    };
+  }
+
+  async syncSinglePacerMonitorCase(caseRow) {
+    const payload = await this.pacerMonitor.enrichCase(caseRow);
+    const timestamp = new Date().toISOString();
+    if (!payload) {
+      return { enriched: false, reason: "not-applicable" };
+    }
+
+    const mergedRaw = {
+      ...(caseRow.raw || {}),
+      pacermonitor: {
+        ...(caseRow.raw?.pacermonitor || {}),
+        caseUrl: payload.url || caseRow.raw?.pacermonitor?.caseUrl || null,
+        title: payload.title || null,
+        metaDescription: payload.metaDescription || null,
+        rowCount: payload.entries?.length || 0,
+        state: payload.state || "empty",
+        syncedAt: payload.syncedAt || timestamp
+      }
+    };
+
+    this.store.upsertCase({
+      source_case_key: caseRow.source_case_key,
+      primary_source: caseRow.primary_source,
+      source_case_id: caseRow.source_case_id,
+      courtlistener_docket_id: caseRow.courtlistener_docket_id,
+      pacer_case_id: caseRow.pacer_case_id,
+      court_id: caseRow.court_id,
+      court_name: caseRow.court_name,
+      case_name: caseRow.case_name,
+      docket_number: caseRow.docket_number,
+      date_filed: caseRow.date_filed,
+      date_terminated: caseRow.date_terminated,
+      cause: caseRow.cause,
+      nature_of_suit: caseRow.nature_of_suit,
+      status: caseRow.status,
+      tags_marker: caseRow.tags_marker,
+      docket_url: caseRow.docket_url,
+      source_urls: [...(caseRow.source_urls || []), payload.url].filter(Boolean),
+      plaintiffs: caseRow.plaintiffs || [],
+      defendants: caseRow.defendants || [],
+      recent_activity_summary: payload.entries?.[0]?.description || caseRow.recent_activity_summary,
+      latest_docket_filed_at: payload.entries?.[0]?.filed_at || caseRow.latest_docket_filed_at,
+      latest_docket_number: payload.entries?.[0]?.row_number || caseRow.latest_docket_number,
+      docket_count: Math.max(caseRow.docket_count || 0, payload.entries?.length || 0),
+      last_seen_at: timestamp,
+      last_synced_at: timestamp,
+      last_docket_sync_at: caseRow.last_docket_sync_at,
+      raw: mergedRaw
+    });
+
+    if (!payload.entries?.length) {
+      return {
+        enriched: false,
+        reason: payload.state || "empty",
+        url: payload.url || null
+      };
+    }
+
+    for (const entry of payload.entries) {
+      const digest = crypto
+        .createHash("sha1")
+        .update(`${payload.url}|${entry.row_number}|${entry.filed_at}|${entry.description}`)
+        .digest("hex")
+        .slice(0, 16);
+
+      this.store.upsertDocketEntry({
+        case_id: caseRow.id,
+        source_entry_key: `pacermonitor:${caseRow.id}:${entry.row_number || "na"}:${digest}`,
+        primary_source: "pacermonitor",
+        source_entry_id: String(entry.row_number || ""),
+        document_type: "PACERMonitor Docket Entry",
+        entry_number: String(entry.row_number || ""),
+        document_number: String(entry.row_number || ""),
+        filed_at: entry.filed_at,
+        description: entry.description,
+        absolute_url: payload.url,
+        is_available: 0,
+        page_count: null,
+        pacer_doc_id: null,
+        raw: entry,
+        last_synced_at: timestamp
       });
     }
 

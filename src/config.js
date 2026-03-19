@@ -59,7 +59,7 @@ export const config = {
   publicDir: path.join(projectRoot, "public"),
   dbPath: path.join(dataDir, "tro-watch.sqlite"),
   seedDbArchivePath: env("SEED_DB_ARCHIVE_PATH", path.join(projectRoot, "seed", "tro-watch.sqlite.gz")),
-  seedDbMinimumCases: envInt("SEED_DB_MIN_CASES", 10000),
+  seedDbMinimumCases: envInt("SEED_DB_MIN_CASES", 40000),
   server: {
     port: envInt("PORT", 4127),
     adminToken: env("ADMIN_TOKEN", "")
@@ -105,8 +105,14 @@ export const config = {
     maxCasesPerRun: envInt("PACER_MAX_CASES_PER_RUN", 2)
   },
   pacerMonitor: {
-    enabled: envBool("PACERMONITOR_ENABLED", false),
-    baseUrl: env("PACERMONITOR_API_BASE_URL", ""),
-    apiKey: env("PACERMONITOR_API_KEY", "")
+    enabled: envBool("PACERMONITOR_PUBLIC_ENABLED", true) || envBool("PACERMONITOR_ENABLED", false),
+    baseUrl: env("PACERMONITOR_BASE_URL", "https://www.pacermonitor.com"),
+    publicSearchBaseUrl: env("PACERMONITOR_PUBLIC_SEARCH_BASE_URL", "https://html.duckduckgo.com/html/"),
+    apiKey: env("PACERMONITOR_API_KEY", ""),
+    minIntervalMs: envInt("PACERMONITOR_MIN_INTERVAL_MS", 2000),
+    timeoutMs: envInt("PACERMONITOR_TIMEOUT_MS", 15000),
+    staleAfterHours: envInt("PACERMONITOR_STALE_AFTER_HOURS", 24),
+    blockedRetryAfterHours: envInt("PACERMONITOR_BLOCKED_RETRY_AFTER_HOURS", 12),
+    maxSearchQueries: envInt("PACERMONITOR_MAX_SEARCH_QUERIES", 3)
   }
 };

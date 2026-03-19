@@ -274,11 +274,15 @@ function sanitizeEntryDocumentType(value) {
     return "Docket Entry";
   }
 
+  if (/pacermonitor/i.test(type)) {
+    return /document/i.test(type) ? "Docket Document" : "Docket Entry";
+  }
+
   if (/pacer document/i.test(type)) {
     return "Docket Document";
   }
 
-  return type.replace(/worldtro/gi, "Docket");
+  return type.replace(/worldtro/gi, "Docket").replace(/pacermonitor/gi, "Docket");
 }
 
 function normalizeDisplayNumber(value) {
@@ -329,6 +333,42 @@ function shouldHydrateWorldtroOnDemand(item = {}) {
 function shouldForceWorldtroRefresh(item = {}) {
   const worldtroRowCount = Number(item.raw?.worldtro?.rowCount || 0);
   return worldtroRowCount > 0 && Number(item.entries?.length || 0) < worldtroRowCount;
+}
+
+function shouldHydratePacerMonitorOnDemand(item = {}) {
+  if (!config.pacerMonitor.enabled) {
+    return false;
+  }
+
+  const docketNumber = String(item.docket_number || "");
+  if (!/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
+    return false;
+  }
+
+  const entryCount = Number(item.entries?.length || 0);
+  const expectedEntries = Math.max(
+    10,
+    Number(item.docket_count || 0),
+    Number(item.raw?.worldtro?.rowCount || 0),
+    6
+  );
+
+  if (entryCount >= expectedEntries) {
+    return false;
+  }
+
+  const syncedAt = item.raw?.pacermonitor?.syncedAt ? Date.parse(item.raw.pacermonitor.syncedAt) : 0;
+  const state = String(item.raw?.pacermonitor?.state || "").toLowerCase();
+  const retryHours =
+    state === "challenge" || state === "rate_limited"
+      ? config.pacerMonitor.blockedRetryAfterHours
+      : config.pacerMonitor.staleAfterHours;
+
+  if (syncedAt && Date.now() - syncedAt < retryHours * 60 * 60 * 1000) {
+    return false;
+  }
+
+  return true;
 }
 
 function serializePublicEntry(entry = {}) {
@@ -534,6 +574,15 @@ async function handleApi(request, response, pathname, searchParams) {
         await syncService.enrichCaseWithWorldtro(caseId, {
           force: shouldForceWorldtroRefresh(item)
         });
+        item = store.getCase(caseId) || item;
+      } catch {
+        // Fall back to the best data already in the local store.
+      }
+    }
+
+    if (shouldHydratePacerMonitorOnDemand(item)) {
+      try {
+        await syncService.enrichCaseWithPacerMonitor(caseId);
         item = store.getCase(caseId) || item;
       } catch {
         // Fall back to the best data already in the local store.
