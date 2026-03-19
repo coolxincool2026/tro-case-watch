@@ -578,6 +578,42 @@ function serializePublicStatus(status = {}) {
   };
 }
 
+function serializeGapPayload(payload = {}) {
+  return {
+    summary: {
+      total: Number(payload.summary?.total || 0),
+      worldtro: Number(payload.summary?.worldtro || 0),
+      pacermonitor: Number(payload.summary?.pacermonitor || 0),
+      challenge: Number(payload.summary?.challenge || 0)
+    },
+    items: Array.isArray(payload.items)
+      ? payload.items.map((item) => ({
+          id: Number(item.id || 0),
+          docket_number: item.docket_number || null,
+          case_name: item.case_name || null,
+          court_name: item.court_name || null,
+          latest_docket_filed_at: item.latest_docket_filed_at || null,
+          lead_law_firm: item.lead_law_firm || null,
+          defendant_count: Number(item.defendant_count || 0),
+          docket_count: Number(item.docket_count || 0),
+          total_entries: Number(item.total_entries || 0),
+          expected_entries: Number(item.expected_entries || 0),
+          gap: Number(item.gap || 0),
+          worldtro_row_count: Number(item.worldtro_row_count || 0),
+          worldtro_entries: Number(item.worldtro_entries || 0),
+          pacermonitor_entries: Number(item.pacermonitor_entries || 0),
+          worldtro_synced_at: item.worldtro_synced_at || null,
+          pacermonitor_synced_at: item.pacermonitor_synced_at || null,
+          pacermonitor_state: item.pacermonitor_state || null,
+          is_recent_case: Boolean(item.is_recent_case),
+          providers_needed: Array.isArray(item.providers_needed) ? item.providers_needed : [],
+          reasons: Array.isArray(item.reasons) ? item.reasons : [],
+          source_urls: Array.isArray(item.source_urls) ? item.source_urls : []
+        }))
+      : []
+  };
+}
+
 function looksLikeDocketFragment(value = "") {
   return /^\d{4,6}$/.test(String(value || "").trim());
 }
@@ -703,6 +739,17 @@ async function handleApi(request, response, pathname, searchParams) {
     return sendJson(response, 200, serializePublicStatus(syncService.getPublicStatus()));
   }
 
+  if (request.method === "GET" && pathname === "/api/admin/gaps") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    const limit = Math.min(Math.max(Number(searchParams.get("limit") || 25), 1), 100);
+    return sendJson(response, 200, serializeGapPayload(store.getCoverageGapCases(limit, {
+      recentWindowDays: config.pacerMonitor.recentWindowDays
+    })));
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
@@ -736,6 +783,21 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/pacermonitor-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    syncService
+      .syncPacerMonitorRecent("backfill")
+      .catch((error) => console.error("[pacermonitor-sync]", error.message, error.body || ""));
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "pacermonitor-sync"
+    });
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/court-feed-sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
@@ -763,6 +825,55 @@ async function handleApi(request, response, pathname, searchParams) {
     return sendJson(response, 202, {
       accepted: true,
       mode: "law-firm-sync"
+    });
+  }
+
+  if (request.method === "POST" && pathname === "/api/admin/enrich-case") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    const body = await readRequestBody(request);
+    const requestedProviders = Array.isArray(body.providers) ? body.providers : ["worldtro", "pacermonitor"];
+    const providers = [...new Set(requestedProviders.filter((item) => item === "worldtro" || item === "pacermonitor"))];
+
+    let item = Number(body.caseId) > 0 ? store.getCase(Number(body.caseId)) : null;
+    if (!item && body.search) {
+      const payload = store.listCases({
+        startDate: config.sync.startDate,
+        category: "all",
+        search: String(body.search || "").trim(),
+        page: 1,
+        pageSize: 5
+      });
+      const first = payload.items?.[0];
+      item = first ? store.getCase(first.id) : null;
+    }
+
+    if (!item) {
+      return sendJson(response, 404, { error: "Case not found" });
+    }
+
+    Promise.resolve()
+      .then(async () => {
+        if (providers.includes("worldtro")) {
+          await syncService.enrichCaseWithWorldtro(item.id, { force: true });
+        }
+
+        if (providers.includes("pacermonitor")) {
+          await syncService.enrichCaseWithPacerMonitor(item.id, { force: true });
+        }
+      })
+      .catch((error) => console.error("[enrich-case]", error.message, error.body || ""));
+
+    return sendJson(response, 202, {
+      accepted: true,
+      case: {
+        id: item.id,
+        docket_number: item.docket_number || null,
+        case_name: item.case_name || null
+      },
+      providers
     });
   }
 

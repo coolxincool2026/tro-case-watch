@@ -190,8 +190,16 @@ docker compose -f deploy/gcp/compose.yml logs -f caddy
 
 - `跑 Recent`
 - `跑 WorldTRO`
+- `跑 PACERMonitor`
 - `跑法院源`
 - `跑律所源`
+
+页面还会额外显示：
+
+- 当前明显没补满的案件列表
+- `WorldTRO / PACERMonitor` 哪一层还缺
+- `PACERMonitor challenge` 的案件数量
+- 一个“强制补首个命中案”的单案入口
 
 如果页面点击后返回 `401`，通常是 `ADMIN_TOKEN` 还没设置，或者浏览器里填的 token 不对。
 

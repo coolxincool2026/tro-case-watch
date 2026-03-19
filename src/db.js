@@ -1350,6 +1350,140 @@ export class Store {
       .map((item) => item.row);
   }
 
+  getCoverageGapCases(limit = 25, { recentWindowDays = 90 } = {}) {
+    const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
+    const recentCutoffIso = new Date(recentCutoff).toISOString();
+    const candidatePoolSize = Math.max(limit * 80, 300);
+
+    const candidateRows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date('2025-01-01')
+          AND (
+            tags_marker LIKE '%|tro|%'
+            OR tags_marker LIKE '%|schedule_a|%'
+            OR tags_marker LIKE '%|seller_tro|%'
+            OR COALESCE(latest_docket_filed_at, date_filed, updated_at) >= ?
+          )
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+        LIMIT ?
+      `)
+      .all(recentCutoffIso, candidatePoolSize)
+      .map(buildCaseView);
+
+    const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+    const snapshots = candidateRows
+      .map((row) => {
+        const coverage = entryCounts.get(Number(row.id)) || {
+          totalEntries: 0,
+          worldtroEntries: 0,
+          pacermonitorEntries: 0
+        };
+        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
+        const isRecentCase = activityAtMs >= recentCutoff;
+        const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
+        const expectedEntries = Math.max(
+          row.insights?.is_seller_case ? 12 : 8,
+          isRecentCase ? 10 : 0,
+          Number(row.docket_count || 0),
+          worldtroRowCount
+        );
+        const totalEntries = Number(coverage.totalEntries || 0);
+        const gap = Math.max(0, expectedEntries - totalEntries);
+        const pacerMonitorState = String(row.raw?.pacermonitor?.state || "").toLowerCase() || null;
+        const worldtroSyncedAt = row.raw?.worldtro?.syncedAt || null;
+        const pacerMonitorSyncedAt = row.raw?.pacermonitor?.syncedAt || null;
+        const missingWorldtroCoverage = worldtroRowCount > 0 && totalEntries < worldtroRowCount;
+        const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
+        const reasons = [];
+        const providersNeeded = [];
+
+        if (missingWorldtroCoverage) {
+          reasons.push(`WorldTRO 公开时间线应有 ${worldtroRowCount} 条，当前只有 ${totalEntries} 条`);
+          providersNeeded.push("worldtro");
+        }
+
+        if (gap > 0 && hasCivilDocketNumber && !providersNeeded.includes("pacermonitor")) {
+          reasons.push(`当前预期至少 ${expectedEntries} 条，本站已有 ${totalEntries} 条`);
+          providersNeeded.push("pacermonitor");
+        }
+
+        if ((pacerMonitorState === "challenge" || pacerMonitorState === "rate_limited") && !providersNeeded.includes("pacermonitor")) {
+          reasons.push(`PACERMonitor 当前返回 ${pacerMonitorState}`);
+          providersNeeded.push("pacermonitor");
+        }
+
+        return {
+          id: row.id,
+          docket_number: row.docket_number,
+          case_name: row.case_name,
+          court_id: row.court_id,
+          court_name: row.court_name,
+          latest_docket_filed_at: row.latest_docket_filed_at || row.date_filed || null,
+          lead_law_firm: row.insights?.lead_law_firm || null,
+          defendant_count: Number(row.insights?.defendant_count || 0),
+          docket_count: Number(row.docket_count || 0),
+          total_entries: totalEntries,
+          expected_entries: expectedEntries,
+          gap,
+          worldtro_row_count: worldtroRowCount,
+          worldtro_entries: Number(coverage.worldtroEntries || 0),
+          pacermonitor_entries: Number(coverage.pacermonitorEntries || 0),
+          worldtro_synced_at: worldtroSyncedAt,
+          pacermonitor_synced_at: pacerMonitorSyncedAt,
+          pacermonitor_state: pacerMonitorState,
+          is_recent_case: isRecentCase,
+          providers_needed: providersNeeded,
+          reasons,
+          source_urls: Array.isArray(row.source_urls) ? row.source_urls : []
+        };
+      })
+      .filter((item) => item.providers_needed.length > 0)
+      .sort((left, right) => {
+        const leftNeedsWorldtro = left.providers_needed.includes("worldtro");
+        const rightNeedsWorldtro = right.providers_needed.includes("worldtro");
+        if (leftNeedsWorldtro !== rightNeedsWorldtro) {
+          return leftNeedsWorldtro ? -1 : 1;
+        }
+
+        if (left.gap !== right.gap) {
+          return right.gap - left.gap;
+        }
+
+        const activityCompare = compareCaseActivityDesc(left.latest_docket_filed_at, right.latest_docket_filed_at);
+        if (activityCompare !== 0) {
+          return activityCompare;
+        }
+
+        return Number(right.id || 0) - Number(left.id || 0);
+      });
+
+    const items = snapshots.slice(0, limit);
+    const summary = snapshots.reduce(
+      (acc, item) => {
+        acc.total += 1;
+        if (item.providers_needed.includes("worldtro")) {
+          acc.worldtro += 1;
+        }
+        if (item.providers_needed.includes("pacermonitor")) {
+          acc.pacermonitor += 1;
+        }
+        if (item.pacermonitor_state === "challenge" || item.pacermonitor_state === "rate_limited") {
+          acc.challenge += 1;
+        }
+        return acc;
+      },
+      { total: 0, worldtro: 0, pacermonitor: 0, challenge: 0 }
+    );
+
+    return {
+      summary,
+      items
+    };
+  }
+
   getPendingCaseTranslations(limit) {
     return this.db
       .prepare(`

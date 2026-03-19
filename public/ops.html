@@ -135,6 +135,10 @@
         gap: 12px;
       }
 
+      .wide {
+        margin-top: 18px;
+      }
+
       .metric {
         padding: 14px 16px;
         border-radius: 16px;
@@ -194,10 +198,66 @@
         line-height: 1.6;
       }
 
+      .inline-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .gap-summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .gap-list {
+        margin-top: 14px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .gap-card {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: rgba(255, 255, 255, 0.74);
+      }
+
+      .gap-card strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .gap-meta,
+      .gap-reasons {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .gap-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .gap-chip {
+        padding: 5px 10px;
+        border-radius: 999px;
+        background: #eee3cf;
+        color: var(--text);
+        font-size: 12px;
+      }
+
       @media (max-width: 860px) {
         .grid,
         .metrics,
-        .buttons {
+        .buttons,
+        .gap-summary,
+        .inline-row {
           grid-template-columns: 1fr;
         }
 
@@ -239,12 +299,20 @@
             <button data-endpoint="/api/admin/docket-backfill" type="button">
               跑 WorldTRO
             </button>
+            <button data-endpoint="/api/admin/pacermonitor-sync" type="button">
+              跑 PACERMonitor
+            </button>
             <button data-endpoint="/api/admin/court-feed-sync" type="button">
               跑法院源
             </button>
             <button data-endpoint="/api/admin/law-firm-sync" type="button">
               跑律所源
             </button>
+          </div>
+
+          <div class="inline-row">
+            <input id="caseSearch" type="text" placeholder="例如 25-cv-62610 或 1:25-cv-11640" />
+            <button id="forceHydrate" type="button">强制补首个命中案</button>
           </div>
 
           <div id="actionStatus" class="status">准备就绪。</div>
@@ -275,17 +343,48 @@
           <pre id="statusJson">{}</pre>
         </section>
       </section>
+
+      <section class="panel wide">
+        <h2>缺口案件</h2>
+        <div class="gap-summary">
+          <div class="metric">
+            <span class="label">缺口总数</span>
+            <span id="gapTotal" class="value">-</span>
+          </div>
+          <div class="metric">
+            <span class="label">待补 WorldTRO</span>
+            <span id="gapWorldtro" class="value">-</span>
+          </div>
+          <div class="metric">
+            <span class="label">待补 PACERMonitor</span>
+            <span id="gapPacerMonitor" class="value">-</span>
+          </div>
+          <div class="metric">
+            <span class="label">PM Challenge</span>
+            <span id="gapChallenge" class="value">-</span>
+          </div>
+        </div>
+        <div id="gapStatus" class="status">填写 token 后会自动读取缺口案件。</div>
+        <div id="gapList" class="gap-list"></div>
+      </section>
     </main>
 
     <script>
       const tokenKey = "trotracker-admin-token";
       const tokenInput = document.querySelector("#adminToken");
+      const caseSearch = document.querySelector("#caseSearch");
       const actionStatus = document.querySelector("#actionStatus");
       const syncState = document.querySelector("#syncState");
       const statusJson = document.querySelector("#statusJson");
       const totalCases = document.querySelector("#totalCases");
       const scheduleCases = document.querySelector("#scheduleCases");
       const todayCases = document.querySelector("#todayCases");
+      const gapTotal = document.querySelector("#gapTotal");
+      const gapWorldtro = document.querySelector("#gapWorldtro");
+      const gapPacerMonitor = document.querySelector("#gapPacerMonitor");
+      const gapChallenge = document.querySelector("#gapChallenge");
+      const gapStatus = document.querySelector("#gapStatus");
+      const gapList = document.querySelector("#gapList");
 
       function setMessage(element, text, tone = "") {
         element.textContent = text;
@@ -299,6 +398,7 @@
       function saveToken() {
         localStorage.setItem(tokenKey, readToken());
         setMessage(actionStatus, "Token 已保存到当前浏览器。", "ok");
+        refreshGaps();
       }
 
       async function refreshStatus() {
@@ -348,13 +448,87 @@
 
           setMessage(actionStatus, `已接受：${endpoint}。任务会在后台继续跑。`, "ok");
           await refreshStatus();
+          await refreshGaps();
         } catch (error) {
           setMessage(actionStatus, `触发失败：${error.message}`, "error");
         }
       }
 
+      function renderGapList(payload) {
+        gapTotal.textContent = Number(payload.summary?.total || 0).toLocaleString("zh-CN");
+        gapWorldtro.textContent = Number(payload.summary?.worldtro || 0).toLocaleString("zh-CN");
+        gapPacerMonitor.textContent = Number(payload.summary?.pacermonitor || 0).toLocaleString("zh-CN");
+        gapChallenge.textContent = Number(payload.summary?.challenge || 0).toLocaleString("zh-CN");
+
+        gapList.innerHTML = "";
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        if (!items.length) {
+          gapList.innerHTML = "<div class=\"gap-card\"><strong>当前没有明显缺口案件。</strong></div>";
+          return;
+        }
+
+        items.forEach((item) => {
+          const div = document.createElement("div");
+          div.className = "gap-card";
+          const chips = (item.providers_needed || []).map((value) => `<span class="gap-chip">${value}</span>`).join("");
+          const reasons = (item.reasons || []).map((value) => `<div>${value}</div>`).join("");
+          div.innerHTML = `
+            <strong>${item.docket_number || "-"} · ${item.case_name || "-"}</strong>
+            <div class="gap-meta">
+              ${item.court_name || "-"} | 当前 ${item.total_entries || 0} 条 / 预期 ${item.expected_entries || 0} 条 | docket_count ${item.docket_count || 0}
+            </div>
+            <div class="gap-meta">
+              律所：${item.lead_law_firm || "-"} | PM 状态：${item.pacermonitor_state || "-"} | 最近活动：${item.latest_docket_filed_at || "-"}
+            </div>
+            <div class="gap-chip-row">${chips}</div>
+            <div class="gap-reasons">${reasons}</div>
+          `;
+          gapList.appendChild(div);
+        });
+      }
+
+      async function refreshGaps() {
+        const token = readToken();
+        if (!token) {
+          setMessage(gapStatus, "填入 ADMIN_TOKEN 后会自动显示缺口案件。", "");
+          return;
+        }
+
+        try {
+          const response = await fetch("/api/admin/gaps?limit=18", {
+            headers: {
+              "x-admin-token": token
+            }
+          });
+          const text = await response.text();
+          if (!response.ok) {
+            throw new Error(`${response.status} ${text}`);
+          }
+
+          const payload = JSON.parse(text);
+          renderGapList(payload);
+          setMessage(gapStatus, "缺口案件列表已刷新。", "ok");
+        } catch (error) {
+          setMessage(gapStatus, `读取缺口案件失败：${error.message}`, "error");
+        }
+      }
+
+      async function forceHydrateFirstMatch() {
+        const search = caseSearch.value.trim();
+        if (!search) {
+          setMessage(actionStatus, "先填案号或关键词，再强制补源。", "warn");
+          return;
+        }
+
+        await trigger("/api/admin/enrich-case", {
+          search,
+          providers: ["worldtro", "pacermonitor"]
+        });
+      }
+
       document.querySelector("#saveToken").addEventListener("click", saveToken);
       document.querySelector("#refreshStatus").addEventListener("click", refreshStatus);
+      document.querySelector("#forceHydrate").addEventListener("click", forceHydrateFirstMatch);
 
       document.querySelectorAll("button[data-endpoint]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -365,7 +539,9 @@
 
       tokenInput.value = localStorage.getItem(tokenKey) || "";
       refreshStatus();
+      refreshGaps();
       setInterval(refreshStatus, 15000);
+      setInterval(refreshGaps, 30000);
     </script>
   </body>
 </html>
