@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TRO Tracker Ops</title>
+    <style>
+      :root {
+        --bg: #f3efe4;
+        --panel: #fffaf0;
+        --text: #1f2a37;
+        --muted: #6b7280;
+        --line: rgba(31, 42, 55, 0.12);
+        --accent: #8a4b08;
+        --accent-strong: #6f3b07;
+        --ok: #12715b;
+        --warn: #9a6700;
+        --error: #b42318;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", sans-serif;
+        background:
+          radial-gradient(circle at top right, rgba(138, 75, 8, 0.08), transparent 22rem),
+          linear-gradient(180deg, #f8f3e8 0%, var(--bg) 55%, #ece6d8 100%);
+        color: var(--text);
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 20px 56px;
+      }
+
+      .hero,
+      .panel {
+        background: rgba(255, 250, 240, 0.88);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        box-shadow: 0 18px 48px rgba(31, 42, 55, 0.08);
+        backdrop-filter: blur(10px);
+      }
+
+      .hero {
+        padding: 28px;
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 32px;
+        line-height: 1.1;
+      }
+
+      .subtitle {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px;
+      }
+
+      .panel {
+        padding: 22px;
+      }
+
+      .panel h2 {
+        margin: 0 0 14px;
+        font-size: 20px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+
+      input,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input {
+        width: 100%;
+        padding: 14px 16px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.9);
+      }
+
+      .buttons {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 14px;
+        padding: 14px 16px;
+        background: var(--accent);
+        color: white;
+        cursor: pointer;
+        transition: transform 0.15s ease, background 0.15s ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        background: var(--accent-strong);
+      }
+
+      button.secondary {
+        background: #e8deca;
+        color: var(--text);
+      }
+
+      button.secondary:hover {
+        background: #ddd0b4;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .metric {
+        padding: 14px 16px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.75);
+        border: 1px solid var(--line);
+      }
+
+      .metric .label {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 6px;
+      }
+
+      .metric .value {
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .status {
+        margin-top: 14px;
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.7);
+        border: 1px solid var(--line);
+        color: var(--muted);
+        min-height: 48px;
+      }
+
+      .status.ok {
+        color: var(--ok);
+      }
+
+      .status.warn {
+        color: var(--warn);
+      }
+
+      .status.error {
+        color: var(--error);
+      }
+
+      pre {
+        margin: 12px 0 0;
+        padding: 16px;
+        min-height: 280px;
+        overflow: auto;
+        border-radius: 16px;
+        background: #171717;
+        color: #e5e7eb;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .note {
+        margin-top: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      @media (max-width: 860px) {
+        .grid,
+        .metrics,
+        .buttons {
+          grid-template-columns: 1fr;
+        }
+
+        main {
+          padding: 18px 14px 40px;
+        }
+
+        .hero,
+        .panel {
+          padding: 18px;
+          border-radius: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <h1>TRO Tracker Ops</h1>
+        <p class="subtitle">
+          这个页面专门用来后台触发补数，不需要再靠 SSH 挂着跑。填一次
+          <code>ADMIN_TOKEN</code> 后，可以直接点按钮触发
+          <code>WorldTRO</code>、法院官方源和律所官网补源。
+        </p>
+      </section>
+
+      <section class="grid">
+        <section class="panel">
+          <h2>触发同步</h2>
+          <label for="adminToken">ADMIN_TOKEN</label>
+          <input id="adminToken" type="password" placeholder="填服务器 .env 里的 ADMIN_TOKEN" />
+
+          <div class="buttons">
+            <button id="saveToken" class="secondary" type="button">保存 Token</button>
+            <button id="refreshStatus" class="secondary" type="button">刷新状态</button>
+            <button data-endpoint="/api/admin/sync" data-body='{"mode":"recent"}' type="button">
+              跑 Recent
+            </button>
+            <button data-endpoint="/api/admin/docket-backfill" type="button">
+              跑 WorldTRO
+            </button>
+            <button data-endpoint="/api/admin/court-feed-sync" type="button">
+              跑法院源
+            </button>
+            <button data-endpoint="/api/admin/law-firm-sync" type="button">
+              跑律所源
+            </button>
+          </div>
+
+          <div id="actionStatus" class="status">准备就绪。</div>
+
+          <p class="note">
+            如果点击后返回 <code>401</code>，通常是 token 没填对，或者服务器
+            <code>.env</code> 里还没有设置 <code>ADMIN_TOKEN</code>。
+          </p>
+        </section>
+
+        <section class="panel">
+          <h2>线上状态</h2>
+          <div class="metrics">
+            <div class="metric">
+              <span class="label">总案件</span>
+              <span id="totalCases" class="value">-</span>
+            </div>
+            <div class="metric">
+              <span class="label">Schedule A</span>
+              <span id="scheduleCases" class="value">-</span>
+            </div>
+            <div class="metric">
+              <span class="label">今日新增</span>
+              <span id="todayCases" class="value">-</span>
+            </div>
+          </div>
+          <div id="syncState" class="status">正在读取状态...</div>
+          <pre id="statusJson">{}</pre>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      const tokenKey = "trotracker-admin-token";
+      const tokenInput = document.querySelector("#adminToken");
+      const actionStatus = document.querySelector("#actionStatus");
+      const syncState = document.querySelector("#syncState");
+      const statusJson = document.querySelector("#statusJson");
+      const totalCases = document.querySelector("#totalCases");
+      const scheduleCases = document.querySelector("#scheduleCases");
+      const todayCases = document.querySelector("#todayCases");
+
+      function setMessage(element, text, tone = "") {
+        element.textContent = text;
+        element.className = tone ? `status ${tone}` : "status";
+      }
+
+      function readToken() {
+        return tokenInput.value.trim();
+      }
+
+      function saveToken() {
+        localStorage.setItem(tokenKey, readToken());
+        setMessage(actionStatus, "Token 已保存到当前浏览器。", "ok");
+      }
+
+      async function refreshStatus() {
+        try {
+          const response = await fetch("/api/sync/status", { cache: "no-store" });
+          const data = await response.json();
+          const totals = data.dashboard?.totals || {};
+
+          totalCases.textContent = Number(totals.total_cases || 0).toLocaleString("zh-CN");
+          scheduleCases.textContent = Number(totals.schedule_a_cases || 0).toLocaleString("zh-CN");
+          todayCases.textContent = Number(totals.today_added_watchlist || 0).toLocaleString("zh-CN");
+
+          const runLabel = data.isRunning
+            ? `后台正在跑 ${data.currentMode || "sync"}，开始于 ${data.lastStartedAt || "-"}`
+            : `当前空闲，上次完成于 ${data.lastFinishedAt || "-"}`;
+          setMessage(syncState, runLabel, data.isRunning ? "warn" : "ok");
+
+          statusJson.textContent = JSON.stringify(data, null, 2);
+        } catch (error) {
+          setMessage(syncState, `读取状态失败：${error.message}`, "error");
+        }
+      }
+
+      async function trigger(endpoint, body) {
+        const token = readToken();
+        if (!token) {
+          setMessage(actionStatus, "先填 ADMIN_TOKEN 再触发。", "warn");
+          return;
+        }
+
+        setMessage(actionStatus, `正在提交 ${endpoint} ...`, "warn");
+
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-admin-token": token
+            },
+            body: body ? JSON.stringify(body) : "{}"
+          });
+
+          const text = await response.text();
+          if (!response.ok) {
+            throw new Error(`${response.status} ${text}`);
+          }
+
+          setMessage(actionStatus, `已接受：${endpoint}。任务会在后台继续跑。`, "ok");
+          await refreshStatus();
+        } catch (error) {
+          setMessage(actionStatus, `触发失败：${error.message}`, "error");
+        }
+      }
+
+      document.querySelector("#saveToken").addEventListener("click", saveToken);
+      document.querySelector("#refreshStatus").addEventListener("click", refreshStatus);
+
+      document.querySelectorAll("button[data-endpoint]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const body = button.dataset.body ? JSON.parse(button.dataset.body) : null;
+          trigger(button.dataset.endpoint, body);
+        });
+      });
+
+      tokenInput.value = localStorage.getItem(tokenKey) || "";
+      refreshStatus();
+      setInterval(refreshStatus, 15000);
+    </script>
+  </body>
+</html>

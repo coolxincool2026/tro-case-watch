@@ -176,6 +176,25 @@ docker compose -f deploy/gcp/compose.yml logs -f app
 docker compose -f deploy/gcp/compose.yml logs -f caddy
 ```
 
+### 8. 无 SSH 的后台补数页面
+
+部署完成后，可以直接打开：
+
+- `https://www.trotracker.com/ops.html`
+
+这个页面会调用现有的异步管理接口，不需要再挂着 SSH 等长任务跑完。前提是服务器 `.env` 里已经设置了：
+
+- `ADMIN_TOKEN=你自己的长随机字符串`
+
+可用按钮包括：
+
+- `跑 Recent`
+- `跑 WorldTRO`
+- `跑法院源`
+- `跑律所源`
+
+如果页面点击后返回 `401`，通常是 `ADMIN_TOKEN` 还没设置，或者浏览器里填的 token 不对。
+
 ## Oracle Cloud Always Free 部署
 
 这个项目依赖常驻 Node 进程、定时同步和本地 `SQLite`，不适合部署到会休眠或临时磁盘的免费 PaaS。当前仓库已经带好一套适合 `Oracle Cloud Always Free VM` 的部署文件：
