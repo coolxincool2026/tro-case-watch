@@ -93,7 +93,8 @@ export const config = {
     baseUrl: env("COURTLISTENER_BASE_URL", "https://www.courtlistener.com/api/rest/v4"),
     apiToken: env("COURTLISTENER_API_TOKEN", ""),
     enableDocketSync: envBool("COURTLISTENER_ENABLE_DOCKET_SYNC", false),
-    docketMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_MAX_CASES_PER_RUN", 8)
+    docketMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_MAX_CASES_PER_RUN", 8),
+    docketBackfillMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_BACKFILL_MAX_CASES_PER_RUN", 40)
   },
   worldtro: {
     enabled: envBool("WORLDTRO_ENABLED", true),

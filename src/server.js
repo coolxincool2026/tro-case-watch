@@ -628,12 +628,18 @@ function serializeGapPayload(payload = {}) {
   };
 }
 
-function looksLikeDocketFragment(value = "") {
-  return /^\d{4,6}$/.test(String(value || "").trim());
+function normalizeCategory(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["watchlist", "seller_watch", "tro", "schedule_a", "all"].includes(normalized) ? normalized : "";
 }
 
-function resolveSearchCategory(search = "") {
-  if (docketLooksLike(search) || looksLikeDocketFragment(search)) {
+function resolveSearchCategory(search = "", requestedCategory = "") {
+  const explicitCategory = normalizeCategory(requestedCategory);
+  if (explicitCategory) {
+    return explicitCategory;
+  }
+
+  if (docketLooksLike(search)) {
     return "all";
   }
 
@@ -686,7 +692,7 @@ async function handleApi(request, response, pathname, searchParams) {
   if (request.method === "GET" && pathname === "/api/cases") {
     const filters = {
       startDate: config.sync.startDate,
-      category: resolveSearchCategory(searchParams.get("search") || ""),
+      category: resolveSearchCategory(searchParams.get("search") || "", searchParams.get("category") || ""),
       search: searchParams.get("search") || "",
       court: searchParams.get("court") || "",
       page: Number(searchParams.get("page") || 1),
@@ -694,7 +700,7 @@ async function handleApi(request, response, pathname, searchParams) {
     };
 
     let payload = store.listCases(filters);
-    const isDirectDocketLookup = docketLooksLike(filters.search) || looksLikeDocketFragment(filters.search);
+    const isDirectDocketLookup = docketLooksLike(filters.search);
 
     if (filters.search && payload.total === 0 && isDirectDocketLookup) {
       const relaxedPayload = findRelaxedPayload(store, filters);
@@ -703,7 +709,7 @@ async function handleApi(request, response, pathname, searchParams) {
       }
     }
 
-    if (filters.search && payload.total === 0) {
+    if (filters.search && payload.total === 0 && isDirectDocketLookup) {
       try {
         const imported = await syncService.importLookup(filters.search);
         payload = store.listCases(filters);
@@ -720,7 +726,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     if (filters.search && payload.items?.length) {
-      const exactDocketLookup = docketLooksLike(filters.search) || looksLikeDocketFragment(filters.search);
+      const exactDocketLookup = docketLooksLike(filters.search);
       if (exactDocketLookup) {
         payload.items.slice(0, 3).forEach((item) => {
           const detail = store.getCase(item.id);

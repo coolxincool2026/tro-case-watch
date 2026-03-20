@@ -311,7 +311,7 @@ export class CaseSyncService {
       }
 
       try {
-        const docketResult = await this.syncCourtListenerDockets();
+        const docketResult = await this.syncCourtListenerDockets(mode);
         stats.docketCasesSynced += docketResult.syncedCases;
         if (docketResult.note) {
           stats.notes.push(docketResult.note);
@@ -1628,7 +1628,7 @@ export class CaseSyncService {
     };
   }
 
-  async syncCourtListenerDockets() {
+  async syncCourtListenerDockets(mode = "recent") {
     return this.store.batchMutations(async () => {
       if (!this.courtListener.hasDocketAccess()) {
         return {
@@ -1637,7 +1637,10 @@ export class CaseSyncService {
         };
       }
 
-      const candidates = this.store.getCasesNeedingDocketSync(this.config.courtListener.docketMaxCasesPerRun);
+      const limit = mode === "backfill"
+        ? this.config.courtListener.docketBackfillMaxCasesPerRun
+        : this.config.courtListener.docketMaxCasesPerRun;
+      const candidates = this.store.getCasesNeedingDocketSync(limit);
       let syncedCases = 0;
       let metadataOnlyMode = false;
 
@@ -1661,7 +1664,7 @@ export class CaseSyncService {
       return {
         syncedCases,
         note: metadataOnlyMode
-          ? `CourtListener docket 元数据本轮更新 ${syncedCases} 个案件，但当前 token 无权访问 docket-entries。`
+          ? `CourtListener docket 元数据本轮更新 ${syncedCases} 个案件，但当前公开链路未返回可用 docket-entries。`
           : syncedCases
             ? `CourtListener docket API 本轮补齐 ${syncedCases} 个案件。`
             : "CourtListener docket API 已启用，但本轮没有待补齐案件。"

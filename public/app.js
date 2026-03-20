@@ -256,7 +256,14 @@ function renderCases(payload) {
     messages.push(`命中 ${payload.total} 个案件，当前第 ${payload.page} / ${payload.pageCount} 页`);
   }
   if (payload.categoryRelaxed) {
-    messages.push("已优先返回精确案号匹配结果");
+    const relaxedLabel = {
+      all: "全库",
+      watchlist: "监控池",
+      seller_watch: "卖家监控",
+      tro: "TRO",
+      schedule_a: "Schedule A"
+    }[payload.relaxedCategory] || "更宽范围";
+    messages.push(`当前分类没有直接命中，已放宽到${relaxedLabel}结果`);
   }
   if (payload.liveImported?.imported) {
     messages.push(`已实时导入 ${payload.liveImported.imported} 个匹配案件`);

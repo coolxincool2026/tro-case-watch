@@ -60,6 +60,37 @@ function looksLikeDocketSearch(value = "") {
   return /^\d{4,6}$/.test(text) || /\b\d{2}-cv-\d{3,6}\b/i.test(text) || /\b\d+:\d{2}-cv-\d{3,6}\b/i.test(text);
 }
 
+function looksLikeShortNumericFragment(value = "") {
+  return /^\d{4,6}$/.test(String(value || "").trim());
+}
+
+function parseDocketNumber(value) {
+  const match = String(value || "").trim().match(/^(\d+)/);
+  if (!match) {
+    return 0;
+  }
+
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isBankruptcyLike(caseLike = {}) {
+  const docketNumber = String(caseLike.docket_number || "").toLowerCase();
+  const courtName = String(caseLike.court_name || "").toLowerCase();
+  return docketNumber.includes("-bk-") || courtName.includes("bankruptcy");
+}
+
+function isCivilLike(caseLike = {}) {
+  return /\b\d{2}-cv-\d{3,6}\b/i.test(String(caseLike.docket_number || "")) ||
+    /\b\d+:\d{2}-cv-\d{3,6}\b/i.test(String(caseLike.docket_number || ""));
+}
+
+function hasSparsePublicCoverage(caseLike = {}) {
+  const latestNumber = parseDocketNumber(caseLike.latest_docket_number);
+  const knownEntries = Number(caseLike.docket_count || 0);
+  return latestNumber >= 5 && knownEntries <= 1;
+}
+
 function compareIsoDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
@@ -1053,6 +1084,23 @@ export class Store {
         WHERE courtlistener_docket_id IS NOT NULL
           AND date(date_filed) >= date('2025-01-01')
         ORDER BY COALESCE(last_docket_sync_at, '1970-01-01T00:00:00.000Z') ASC,
+                 CASE
+                   WHEN tags_marker LIKE '%|seller_tro|%'
+                     OR tags_marker LIKE '%|tro|%'
+                     OR tags_marker LIKE '%|schedule_a|%'
+                   THEN 1
+                   ELSE 0
+                 END DESC,
+                 CASE
+                   WHEN lower(court_name) LIKE '%bankruptcy%'
+                     OR lower(docket_number) LIKE '%-bk-%'
+                   THEN 1
+                   ELSE 0
+                 END ASC,
+                 MAX(
+                   0,
+                   CAST(REPLACE(COALESCE(latest_docket_number, '0'), '.0', '') AS INTEGER) - COALESCE(docket_count, 0)
+                 ) DESC,
                  COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
         LIMIT ?
       `)
@@ -1825,6 +1873,7 @@ export class Store {
     const docketRaw = row._docket_raw;
     const docketNormalized = row._docket_normalized;
     const labelBlob = row._label_blob;
+    const shortNumericFragment = looksLikeShortNumericFragment(rawNeedle);
 
     let score = 0;
 
@@ -1846,8 +1895,30 @@ export class Store {
       score += 15;
     }
 
+    if (row.insights?.is_tro_case) {
+      score += 8;
+    }
+
+    if (row.insights?.is_schedule_a_case) {
+      score += 6;
+    }
+
     if (row.insights?.is_seller_case) {
       score += 5;
+    }
+
+    if (shortNumericFragment) {
+      if (isCivilLike(row)) {
+        score += 24;
+      }
+
+      if (isBankruptcyLike(row)) {
+        score -= 45;
+      }
+
+      if (hasSparsePublicCoverage(row)) {
+        score -= 35;
+      }
     }
 
     return score;
