@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import zlib from "node:zlib";
-import { URL } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { Store } from "./db.js";
 import { CourtListenerClient } from "./providers/courtlistener.js";
@@ -29,6 +30,8 @@ const mimeTypes = {
   ".webp": "image/webp"
 };
 
+const currentScriptPath = fileURLToPath(import.meta.url);
+
 ensureSeedDatabase();
 
 const store = createStoreWithRecovery();
@@ -51,6 +54,16 @@ const syncService = new CaseSyncService({
   translator
 });
 const backgroundCaseHydrations = new Map();
+
+function spawnDetachedTask(args = []) {
+  const child = spawn(process.execPath, [currentScriptPath, ...args], {
+    cwd: path.dirname(config.publicDir),
+    env: process.env,
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+}
 
 function ensureSeedDatabase() {
   if (!config.seedDbArchivePath || !fs.existsSync(config.seedDbArchivePath)) {
@@ -759,9 +772,7 @@ async function handleApi(request, response, pathname, searchParams) {
     const body = await readRequestBody(request);
     const mode = body.mode === "backfill" ? "backfill" : "recent";
 
-    syncService
-      .run(mode)
-      .catch((error) => console.error("[sync]", error.message, error.body || ""));
+    spawnDetachedTask(["--sync-only", mode]);
 
     return sendJson(response, 202, {
       accepted: true,
@@ -774,9 +785,7 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
 
-    syncService
-      .syncWorldtroRecent("backfill")
-      .catch((error) => console.error("[docket-backfill]", error.message, error.body || ""));
+    spawnDetachedTask(["--sync-only", "worldtro"]);
 
     return sendJson(response, 202, {
       accepted: true,
@@ -789,9 +798,7 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
 
-    syncService
-      .syncPacerMonitorRecent("backfill")
-      .catch((error) => console.error("[pacermonitor-sync]", error.message, error.body || ""));
+    spawnDetachedTask(["--sync-only", "pacermonitor"]);
 
     return sendJson(response, 202, {
       accepted: true,
@@ -804,9 +811,7 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
 
-    syncService
-      .syncCourtListenerDockets()
-      .catch((error) => console.error("[courtlistener-docket-sync]", error.message, error.body || ""));
+    spawnDetachedTask(["--sync-only", "courtlistener-docket"]);
 
     return sendJson(response, 202, {
       accepted: true,
@@ -819,9 +824,7 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
 
-    syncService
-      .syncCourtFeedsRecent("recent")
-      .catch((error) => console.error("[court-feed-sync]", error.message, error.body || ""));
+    spawnDetachedTask(["--sync-only", "courtfeeds"]);
 
     return sendJson(response, 202, {
       accepted: true,
@@ -834,9 +837,7 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
 
-    syncService
-      .syncLawFirmRecent("recent")
-      .catch((error) => console.error("[law-firm-sync]", error.message, error.body || ""));
+    spawnDetachedTask(["--sync-only", "lawfirms"]);
 
     return sendJson(response, 202, {
       accepted: true,
@@ -876,21 +877,12 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 404, { error: "Case not found" });
     }
 
-    Promise.resolve()
-      .then(async () => {
-        if (providers.includes("courtlistener")) {
-          await syncService.enrichCaseWithCourtListener(item.id, { force: true });
-        }
-
-        if (providers.includes("worldtro")) {
-          await syncService.enrichCaseWithWorldtro(item.id, { force: true });
-        }
-
-        if (providers.includes("pacermonitor")) {
-          await syncService.enrichCaseWithPacerMonitor(item.id, { force: true });
-        }
-      })
-      .catch((error) => console.error("[enrich-case]", error.message, error.body || ""));
+    spawnDetachedTask([
+      "--enrich-case-id",
+      String(item.id),
+      "--providers",
+      providers.join(",")
+    ]);
 
     return sendJson(response, 202, {
       accepted: true,
@@ -956,6 +948,33 @@ const server = http.createServer(async (request, response) => {
 });
 
 async function main() {
+  const enrichCaseIdIndex = process.argv.indexOf("--enrich-case-id");
+  if (enrichCaseIdIndex !== -1) {
+    const caseId = Number(process.argv[enrichCaseIdIndex + 1]);
+    const providersIndex = process.argv.indexOf("--providers");
+    const providers = providersIndex !== -1
+      ? String(process.argv[providersIndex + 1] || "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+      : ["courtlistener", "worldtro", "pacermonitor"];
+
+    if (providers.includes("courtlistener")) {
+      await syncService.enrichCaseWithCourtListener(caseId, { force: true });
+    }
+
+    if (providers.includes("worldtro")) {
+      await syncService.enrichCaseWithWorldtro(caseId, { force: true });
+    }
+
+    if (providers.includes("pacermonitor")) {
+      await syncService.enrichCaseWithPacerMonitor(caseId, { force: true });
+    }
+
+    console.log(`[sync] enriched case ${caseId} with ${providers.join(",")}`);
+    process.exit(0);
+  }
+
   const syncOnlyIndex = process.argv.indexOf("--sync-only");
   if (syncOnlyIndex !== -1) {
     const rawMode = process.argv[syncOnlyIndex + 1];
@@ -974,6 +993,18 @@ async function main() {
     if (rawMode === "lawfirms") {
       const result = await syncService.syncLawFirmRecent("recent");
       console.log(`[sync] completed lawfirms ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "pacermonitor") {
+      const result = await syncService.syncPacerMonitorRecent("backfill");
+      console.log(`[sync] completed pacermonitor ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "courtlistener-docket") {
+      const result = await syncService.syncCourtListenerDockets();
+      console.log(`[sync] completed courtlistener-docket ${JSON.stringify(result)}`);
       process.exit(0);
     }
 
