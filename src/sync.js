@@ -185,9 +185,14 @@ export class CaseSyncService {
     const dashboard = this.store.getDashboardStats();
     const lastNotes = dashboard.recentSync?.stats?.notes || [];
     const knownNoDocketEntries = lastNotes.some((note) => note.includes("无权访问 docket-entries"));
+    const recentSyncRunning = dashboard.recentSync?.status === "running";
 
     return {
       ...this.state,
+      isRunning: this.state.isRunning || recentSyncRunning,
+      currentMode: this.state.currentMode || (recentSyncRunning ? dashboard.recentSync?.mode || null : null),
+      lastStartedAt: this.state.lastStartedAt || dashboard.recentSync?.started_at || null,
+      lastFinishedAt: this.state.lastFinishedAt || dashboard.recentSync?.finished_at || null,
       dashboard,
       backfill: this.getBackfillStatus(),
       providers: {
@@ -237,7 +242,12 @@ export class CaseSyncService {
     this.state.lastStartedAt = new Date().toISOString();
     this.state.lastError = null;
 
-    const runId = this.store.startSyncRun("system", mode);
+    const runId = this.store.claimSyncRun("system", mode);
+    if (!runId) {
+      this.state.isRunning = false;
+      this.state.currentMode = null;
+      return this.getPublicStatus();
+    }
     const stats = {
       courtFeedCasesUpserted: 0,
       courtFeedEntriesUpserted: 0,

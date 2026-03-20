@@ -1531,15 +1531,43 @@ export class Store {
       .run(cacheKey, provider, sourceText, translatedText, nowIso());
   }
 
-  startSyncRun(provider, mode) {
-    const result = this.db
-      .prepare(`
-        INSERT INTO sync_runs (provider, mode, status, started_at)
-        VALUES (?, ?, ?, ?)
-      `)
-      .run(provider, mode, "running", nowIso());
+  claimSyncRun(provider, mode, maxAgeMinutes = 180) {
+    const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
 
-    return Number(result.lastInsertRowid);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db
+        .prepare(`
+          SELECT id
+          FROM sync_runs
+          WHERE provider = ?
+            AND status = 'running'
+            AND started_at >= ?
+          ORDER BY started_at DESC
+          LIMIT 1
+        `)
+        .get(provider, cutoff);
+
+      if (existing?.id) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+
+      const result = this.db
+        .prepare(`
+          INSERT INTO sync_runs (provider, mode, status, started_at)
+          VALUES (?, ?, ?, ?)
+        `)
+        .run(provider, mode, "running", nowIso());
+
+      this.db.exec("COMMIT");
+      return Number(result.lastInsertRowid);
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
   }
 
   finishSyncRun(id, status, stats, errorText = null) {

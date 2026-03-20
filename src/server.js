@@ -1020,25 +1020,19 @@ async function main() {
 
   if (config.sync.bootstrapSync) {
     setTimeout(() => {
-      syncService.run("recent").catch((error) => {
-        console.error("[bootstrap-sync]", error.message, error.body || "");
-      });
+      spawnDetachedTask(["--sync-only", "recent"]);
     }, config.sync.bootstrapSyncDelayMs);
   }
 
   if (config.sync.enableScheduler) {
     setInterval(() => {
-      syncService.run("recent").catch((error) => {
-        console.error("[scheduled-sync]", error.message, error.body || "");
-      });
+      spawnDetachedTask(["--sync-only", "recent"]);
     }, config.sync.pollIntervalMs);
   }
 
   if (config.sync.enableBackfillScheduler) {
     setTimeout(() => {
-      syncService.run("backfill").catch((error) => {
-        console.error("[bootstrap-backfill]", error.message, error.body || "");
-      });
+      spawnDetachedTask(["--sync-only", "backfill"]);
     }, config.sync.bootstrapBackfillDelayMs);
 
     setInterval(() => {
@@ -1046,9 +1040,7 @@ async function main() {
         return;
       }
 
-      syncService.run("backfill").catch((error) => {
-        console.error("[scheduled-backfill]", error.message, error.body || "");
-      });
+      spawnDetachedTask(["--sync-only", "backfill"]);
     }, config.sync.backfillIntervalMs);
   }
 }
