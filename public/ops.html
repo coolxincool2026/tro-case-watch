@@ -411,7 +411,16 @@
 
       async function refreshStatus() {
         try {
-          const response = await fetch("/api/sync/status", { cache: "no-store" });
+          const token = readToken();
+          const endpoint = token ? "/api/admin/status" : "/api/sync/status";
+          const response = await fetch(endpoint, {
+            cache: "no-store",
+            headers: token
+              ? {
+                  "x-admin-token": token
+                }
+              : {}
+          });
           const data = await response.json();
           const totals = data.dashboard?.totals || {};
 

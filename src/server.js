@@ -54,6 +54,12 @@ const syncService = new CaseSyncService({
   translator
 });
 const backgroundCaseHydrations = new Map();
+const publicResponseCache = new Map();
+const publicRateLimitBuckets = new Map();
+
+function clearPublicResponseCache() {
+  publicResponseCache.clear();
+}
 
 function spawnDetachedTask(args = []) {
   const child = spawn(process.execPath, [currentScriptPath, ...args], {
@@ -230,7 +236,8 @@ function sendJson(response, statusCode, payload) {
 function buildApiHeaders(origin = "") {
   const headers = {
     "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store"
+    "cache-control": "no-store",
+    "x-robots-tag": "noindex, nofollow, noarchive"
   };
 
   const allowedOrigins = new Set([
@@ -286,6 +293,188 @@ function authorize(request) {
   }
 
   return request.headers["x-admin-token"] === config.server.adminToken;
+}
+
+function getClientIp(request) {
+  const forwarded = String(request.headers["x-forwarded-for"] || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)[0];
+  return forwarded || request.socket?.remoteAddress || "unknown";
+}
+
+function isSuspiciousUserAgent(request) {
+  const userAgent = String(request.headers["user-agent"] || "").toLowerCase();
+  if (!userAgent) {
+    return true;
+  }
+
+  return config.server.suspiciousUserAgentPatterns.some((pattern) =>
+    userAgent.includes(String(pattern || "").toLowerCase())
+  );
+}
+
+function getPublicRateLimitPolicy(pathname) {
+  if (pathname === "/api/cases") {
+    return {
+      scope: "cases",
+      limit: config.server.publicRateLimitCasesPerWindow
+    };
+  }
+
+  if (pathname.startsWith("/api/cases/")) {
+    return {
+      scope: "case-detail",
+      limit: config.server.publicRateLimitCaseDetailPerWindow
+    };
+  }
+
+  if (pathname === "/api/sync/status") {
+    return {
+      scope: "status",
+      limit: config.server.publicRateLimitStatusPerWindow
+    };
+  }
+
+  if (pathname === "/api/health") {
+    return {
+      scope: "health",
+      limit: config.server.publicRateLimitHealthPerWindow
+    };
+  }
+
+  return null;
+}
+
+function pruneRateLimitBuckets() {
+  const cutoff = Date.now() - config.server.publicRateLimitWindowMs * 2;
+  for (const [key, bucket] of publicRateLimitBuckets.entries()) {
+    if (bucket.windowStartedAt < cutoff) {
+      publicRateLimitBuckets.delete(key);
+    }
+  }
+}
+
+function enforcePublicReadRateLimit(request, response, pathname) {
+  if (request.method !== "GET" || authorize(request)) {
+    return false;
+  }
+
+  const policy = getPublicRateLimitPolicy(pathname);
+  if (!policy) {
+    return false;
+  }
+
+  if (publicRateLimitBuckets.size > 5000) {
+    pruneRateLimitBuckets();
+  }
+
+  const suspicious = isSuspiciousUserAgent(request);
+  const effectiveLimit = suspicious
+    ? Math.min(policy.limit, config.server.suspiciousRateLimitPerWindow)
+    : policy.limit;
+  const key = `${getClientIp(request)}:${policy.scope}`;
+  const now = Date.now();
+  const windowMs = config.server.publicRateLimitWindowMs;
+  const bucket = publicRateLimitBuckets.get(key);
+
+  if (!bucket || now - bucket.windowStartedAt >= windowMs) {
+    publicRateLimitBuckets.set(key, {
+      count: 1,
+      windowStartedAt: now
+    });
+    return false;
+  }
+
+  bucket.count += 1;
+  if (bucket.count <= effectiveLimit) {
+    return false;
+  }
+
+  const retryAfter = Math.max(1, Math.ceil((bucket.windowStartedAt + windowMs - now) / 1000));
+  response.writeHead(429, {
+    ...buildApiHeaders(),
+    "retry-after": String(retryAfter)
+  });
+  response.end(JSON.stringify({
+    error: "Too many requests",
+    retry_after_seconds: retryAfter
+  }));
+  return true;
+}
+
+function getPublicCacheTtlMs(pathname) {
+  if (pathname === "/api/health") {
+    return config.server.publicHealthCacheTtlMs;
+  }
+
+  if (pathname === "/api/sync/status") {
+    return config.server.publicStatusCacheTtlMs;
+  }
+
+  if (pathname === "/api/cases") {
+    return config.server.publicCasesCacheTtlMs;
+  }
+
+  if (pathname.startsWith("/api/cases/")) {
+    return config.server.publicCaseDetailCacheTtlMs;
+  }
+
+  return 0;
+}
+
+function getPublicCacheKey(request, pathname) {
+  return `${pathname}::${request.url || pathname}`;
+}
+
+function getCachedPublicPayload(request, pathname) {
+  if (request.method !== "GET" || authorize(request)) {
+    return null;
+  }
+
+  const ttlMs = getPublicCacheTtlMs(pathname);
+  if (ttlMs <= 0) {
+    return null;
+  }
+
+  const key = getPublicCacheKey(request, pathname);
+  const cached = publicResponseCache.get(key);
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    publicResponseCache.delete(key);
+    return null;
+  }
+
+  return cached.payload;
+}
+
+function setCachedPublicPayload(request, pathname, payload) {
+  if (request.method !== "GET" || authorize(request)) {
+    return;
+  }
+
+  const ttlMs = getPublicCacheTtlMs(pathname);
+  if (ttlMs <= 0) {
+    return;
+  }
+
+  const key = getPublicCacheKey(request, pathname);
+  publicResponseCache.set(key, {
+    expiresAt: Date.now() + ttlMs,
+    payload
+  });
+
+  if (publicResponseCache.size <= config.server.publicApiCacheMaxEntries) {
+    return;
+  }
+
+  const oldestKey = publicResponseCache.keys().next().value;
+  if (oldestKey) {
+    publicResponseCache.delete(oldestKey);
+  }
 }
 
 function sanitizeInsights(insights = {}) {
@@ -506,6 +695,7 @@ function queueCaseHydration(caseId, initialItem) {
     .catch(() => {})
     .finally(() => {
       backgroundCaseHydrations.delete(caseId);
+      clearPublicResponseCache();
     });
 
   backgroundCaseHydrations.set(caseId, task);
@@ -619,7 +809,13 @@ function serializePublicStatus(status = {}) {
             finished_at: recentSync.finished_at || null
           }
         : null
-    },
+    }
+  };
+}
+
+function serializeAdminStatus(status = {}) {
+  return {
+    ...serializePublicStatus(status),
     providers: {
       courtfeeds: status.providers?.courtfeeds || null,
       lawfirms: status.providers?.lawfirms || null,
@@ -717,29 +913,44 @@ async function handleApi(request, response, pathname, searchParams) {
     return;
   }
 
+  if (enforcePublicReadRateLimit(request, response, pathname)) {
+    return;
+  }
+
   if (request.method === "GET" && pathname === "/api/health") {
-    return sendJson(response, 200, {
+    const cached = getCachedPublicPayload(request, pathname);
+    if (cached) {
+      return sendJson(response, 200, cached);
+    }
+
+    const payload = {
       ok: true,
       startDate: config.sync.startDate,
       runtime: {
-        dbPath: config.dbPath,
         isRunning: syncService.state.isRunning,
         currentMode: syncService.state.currentMode,
         lastStartedAt: syncService.state.lastStartedAt,
         lastFinishedAt: syncService.state.lastFinishedAt,
         lastError: syncService.state.lastError
       }
-    });
+    };
+    setCachedPublicPayload(request, pathname, payload);
+    return sendJson(response, 200, payload);
   }
 
   if (request.method === "GET" && pathname === "/api/cases") {
+    const cached = getCachedPublicPayload(request, pathname);
+    if (cached) {
+      return sendJson(response, 200, cached);
+    }
+
     const filters = {
       startDate: config.sync.startDate,
       category: resolveSearchCategory(searchParams.get("search") || "", searchParams.get("category") || ""),
       search: searchParams.get("search") || "",
       court: searchParams.get("court") || "",
       page: Number(searchParams.get("page") || 1),
-      pageSize: Number(searchParams.get("pageSize") || 25)
+      pageSize: Math.min(Number(searchParams.get("pageSize") || 25), config.server.publicCasesMaxPageSize)
     };
 
     let payload = store.listCases(filters);
@@ -780,10 +991,17 @@ async function handleApi(request, response, pathname, searchParams) {
       }
     }
 
-    return sendJson(response, 200, serializePublicCasesPayload(payload));
+    const serialized = serializePublicCasesPayload(payload);
+    setCachedPublicPayload(request, pathname, serialized);
+    return sendJson(response, 200, serialized);
   }
 
   if (request.method === "GET" && pathname.startsWith("/api/cases/")) {
+    const cached = getCachedPublicPayload(request, pathname);
+    if (cached) {
+      return sendJson(response, 200, cached);
+    }
+
     const caseId = Number(pathname.split("/").pop());
     let item = store.getCase(caseId);
 
@@ -792,14 +1010,31 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     const hydrationPlan = queueCaseHydration(caseId, item);
-    return sendJson(response, 200, serializePublicCaseDetail({
+    const payload = serializePublicCaseDetail({
       ...item,
       hydration_pending: hydrationPlan
-    }));
+    });
+    setCachedPublicPayload(request, pathname, payload);
+    return sendJson(response, 200, payload);
   }
 
   if (request.method === "GET" && pathname === "/api/sync/status") {
-    return sendJson(response, 200, serializePublicStatus(syncService.getPublicStatus()));
+    const cached = getCachedPublicPayload(request, pathname);
+    if (cached) {
+      return sendJson(response, 200, cached);
+    }
+
+    const payload = serializePublicStatus(syncService.getPublicStatus());
+    setCachedPublicPayload(request, pathname, payload);
+    return sendJson(response, 200, payload);
+  }
+
+  if (request.method === "GET" && pathname === "/api/admin/status") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    return sendJson(response, 200, serializeAdminStatus(syncService.getPublicStatus()));
   }
 
   if (request.method === "GET" && pathname === "/api/admin/gaps") {
@@ -822,6 +1057,7 @@ async function handleApi(request, response, pathname, searchParams) {
     const mode = body.mode === "backfill" ? "backfill" : "recent";
 
     spawnDetachedTask(["--sync-only", mode]);
+    clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -835,6 +1071,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "worldtro"]);
+    clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -848,6 +1085,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "pacermonitor"]);
+    clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -861,6 +1099,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "courtlistener-docket"]);
+    clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -874,6 +1113,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "courtfeeds"]);
+    clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -887,6 +1127,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "lawfirms"]);
+    clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -932,6 +1173,7 @@ async function handleApi(request, response, pathname, searchParams) {
       "--providers",
       providers.join(",")
     ]);
+    clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -959,15 +1201,26 @@ function serveStatic(response, pathname) {
 
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
     const fallback = path.join(config.publicDir, "index.html");
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "x-content-type-options": "nosniff"
+    });
     response.end(fs.readFileSync(fallback));
     return;
   }
 
   const extension = path.extname(filePath);
-  response.writeHead(200, {
+  const headers = {
     "content-type": mimeTypes[extension] || "application/octet-stream"
-  });
+  };
+
+  if (target === "/ops.html") {
+    headers["cache-control"] = "no-store";
+    headers["x-robots-tag"] = "noindex, nofollow, noarchive";
+  }
+
+  headers["x-content-type-options"] = "nosniff";
+  response.writeHead(200, headers);
   response.end(fs.readFileSync(filePath));
 }
 
