@@ -1125,6 +1125,7 @@ export class Store {
           SELECT
             case_id,
             COUNT(*) AS total_entries,
+            SUM(CASE WHEN primary_source = 'courtlistener' THEN 1 ELSE 0 END) AS courtlistener_entries,
             SUM(CASE WHEN primary_source = 'worldtro' THEN 1 ELSE 0 END) AS worldtro_entries,
             SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries
           FROM docket_entries
@@ -1136,6 +1137,7 @@ export class Store {
       for (const row of rows) {
         coverage.set(Number(row.case_id), {
           totalEntries: Number(row.total_entries || 0),
+          courtlistenerEntries: Number(row.courtlistener_entries || 0),
           worldtroEntries: Number(row.worldtro_entries || 0),
           pacermonitorEntries: Number(row.pacermonitor_entries || 0)
         });
@@ -1340,6 +1342,7 @@ export class Store {
       .map((row) => {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
+          courtlistenerEntries: 0,
           worldtroEntries: 0,
           pacermonitorEntries: 0
         };
@@ -1452,25 +1455,42 @@ export class Store {
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
         const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
+        const latestNumber = parseDocketNumber(row.latest_docket_number);
         const expectedEntries = Math.max(
           row.insights?.is_seller_case ? 12 : 8,
           isRecentCase ? 10 : 0,
           Number(row.docket_count || 0),
-          worldtroRowCount
+          worldtroRowCount,
+          latestNumber
         );
         const totalEntries = Number(coverage.totalEntries || 0);
         const gap = Math.max(0, expectedEntries - totalEntries);
+        const courtListenerEntries = Number(coverage.courtlistenerEntries || 0);
         const pacerMonitorState = String(row.raw?.pacermonitor?.state || "").toLowerCase() || null;
         const worldtroSyncedAt = row.raw?.worldtro?.syncedAt || null;
         const pacerMonitorSyncedAt = row.raw?.pacermonitor?.syncedAt || null;
         const missingWorldtroCoverage = worldtroRowCount > 0 && totalEntries < worldtroRowCount;
+        const courtListenerGap = Math.max(0, latestNumber - totalEntries);
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
+        const hasCourtListenerDocket = Number(row.courtlistener_docket_id || 0) > 0;
+        const priorityScore =
+          (row.insights?.is_seller_case ? 40 : 0) +
+          (row.insights?.is_tro_case ? 25 : 0) +
+          (row.insights?.is_schedule_a_case ? 20 : 0) +
+          (isRecentCase ? 5 : 0);
         const reasons = [];
         const providersNeeded = [];
 
+        if (hasCourtListenerDocket && priorityScore > 0 && courtListenerGap >= 3) {
+          reasons.push(`CourtListener 最新公开号约到 ${latestNumber}，本站现有 ${totalEntries} 条`);
+          providersNeeded.push("courtlistener");
+        }
+
         if (missingWorldtroCoverage) {
           reasons.push(`WorldTRO 公开时间线应有 ${worldtroRowCount} 条，当前只有 ${totalEntries} 条`);
-          providersNeeded.push("worldtro");
+          if (!providersNeeded.includes("worldtro")) {
+            providersNeeded.push("worldtro");
+          }
         }
 
         if (gap > 0 && hasCivilDocketNumber && !providersNeeded.includes("pacermonitor")) {
@@ -1494,8 +1514,10 @@ export class Store {
           defendant_count: Number(row.insights?.defendant_count || 0),
           docket_count: Number(row.docket_count || 0),
           total_entries: totalEntries,
+          courtlistener_entries: courtListenerEntries,
           expected_entries: expectedEntries,
           gap,
+          courtlistener_gap: courtListenerGap,
           worldtro_row_count: worldtroRowCount,
           worldtro_entries: Number(coverage.worldtroEntries || 0),
           pacermonitor_entries: Number(coverage.pacermonitorEntries || 0),
@@ -1503,6 +1525,7 @@ export class Store {
           pacermonitor_synced_at: pacerMonitorSyncedAt,
           pacermonitor_state: pacerMonitorState,
           is_recent_case: isRecentCase,
+          priority_score: priorityScore,
           providers_needed: providersNeeded,
           reasons,
           source_urls: Array.isArray(row.source_urls) ? row.source_urls : []
@@ -1510,10 +1533,20 @@ export class Store {
       })
       .filter((item) => item.providers_needed.length > 0)
       .sort((left, right) => {
+        if ((left.priority_score || 0) !== (right.priority_score || 0)) {
+          return (right.priority_score || 0) - (left.priority_score || 0);
+        }
+
         const leftNeedsWorldtro = left.providers_needed.includes("worldtro");
         const rightNeedsWorldtro = right.providers_needed.includes("worldtro");
         if (leftNeedsWorldtro !== rightNeedsWorldtro) {
           return leftNeedsWorldtro ? -1 : 1;
+        }
+
+        const leftNeedsCourtListener = left.providers_needed.includes("courtlistener");
+        const rightNeedsCourtListener = right.providers_needed.includes("courtlistener");
+        if (leftNeedsCourtListener !== rightNeedsCourtListener) {
+          return leftNeedsCourtListener ? -1 : 1;
         }
 
         if (left.gap !== right.gap) {
@@ -1532,6 +1565,9 @@ export class Store {
     const summary = snapshots.reduce(
       (acc, item) => {
         acc.total += 1;
+        if (item.providers_needed.includes("courtlistener")) {
+          acc.courtlistener += 1;
+        }
         if (item.providers_needed.includes("worldtro")) {
           acc.worldtro += 1;
         }
@@ -1543,7 +1579,7 @@ export class Store {
         }
         return acc;
       },
-      { total: 0, worldtro: 0, pacermonitor: 0, challenge: 0 }
+      { total: 0, courtlistener: 0, worldtro: 0, pacermonitor: 0, challenge: 0 }
     );
 
     return {

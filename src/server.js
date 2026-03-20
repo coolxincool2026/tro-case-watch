@@ -383,6 +383,35 @@ function shouldForceWorldtroRefresh(item = {}) {
   return worldtroRowCount > 0 && Number(item.entries?.length || 0) < worldtroRowCount;
 }
 
+function shouldHydrateCourtListenerOnDemand(item = {}) {
+  if (!courtListener.hasDocketAccess() || !item?.courtlistener_docket_id) {
+    return false;
+  }
+
+  const entryCount = Number(item.entries?.length || 0);
+  const latestNumberMatch = String(item.latest_docket_number || "").match(/^(\d+)/);
+  const latestNumber = latestNumberMatch ? Number.parseInt(latestNumberMatch[1], 10) : 0;
+  const expectedEntries = Math.max(
+    item.insights?.is_seller_case ? 12 : 8,
+    item.insights?.is_tro_case ? 10 : 0,
+    item.insights?.is_schedule_a_case ? 10 : 0,
+    Number(item.docket_count || 0),
+    Number(item.raw?.worldtro?.rowCount || 0),
+    latestNumber
+  );
+
+  if (entryCount >= expectedEntries) {
+    return false;
+  }
+
+  const syncedAt = item.last_docket_sync_at ? Date.parse(item.last_docket_sync_at) : 0;
+  if (syncedAt && Date.now() - syncedAt < 2 * 60 * 60 * 1000) {
+    return false;
+  }
+
+  return Boolean(item.insights?.is_seller_case || item.insights?.is_tro_case || item.insights?.is_schedule_a_case);
+}
+
 function shouldHydratePacerMonitorOnDemand(item = {}) {
   if (!config.pacerMonitor.enabled) {
     return false;
@@ -422,10 +451,12 @@ function shouldHydratePacerMonitorOnDemand(item = {}) {
 }
 
 function buildCaseHydrationPlan(item = {}) {
+  const courtlistener = shouldHydrateCourtListenerOnDemand(item);
   const worldtro = shouldHydrateWorldtroOnDemand(item);
   const pacermonitor = shouldHydratePacerMonitorOnDemand(item);
   return {
-    pending: worldtro || pacermonitor,
+    pending: courtlistener || worldtro || pacermonitor,
+    courtlistener,
     worldtro,
     pacermonitor
   };
@@ -443,6 +474,15 @@ function queueCaseHydration(caseId, initialItem) {
 
   const task = (async () => {
     let current = store.getCase(caseId) || initialItem;
+
+    if (plan.courtlistener && shouldHydrateCourtListenerOnDemand(current)) {
+      try {
+        await syncService.enrichCaseWithCourtListener(caseId);
+        current = store.getCase(caseId) || current;
+      } catch {
+        current = store.getCase(caseId) || current;
+      }
+    }
 
     if (plan.worldtro && shouldHydrateWorldtroOnDemand(current)) {
       try {
@@ -596,6 +636,7 @@ function serializeGapPayload(payload = {}) {
   return {
     summary: {
       total: Number(payload.summary?.total || 0),
+      courtlistener: Number(payload.summary?.courtlistener || 0),
       worldtro: Number(payload.summary?.worldtro || 0),
       pacermonitor: Number(payload.summary?.pacermonitor || 0),
       challenge: Number(payload.summary?.challenge || 0)
@@ -611,8 +652,10 @@ function serializeGapPayload(payload = {}) {
           defendant_count: Number(item.defendant_count || 0),
           docket_count: Number(item.docket_count || 0),
           total_entries: Number(item.total_entries || 0),
+          courtlistener_entries: Number(item.courtlistener_entries || 0),
           expected_entries: Number(item.expected_entries || 0),
           gap: Number(item.gap || 0),
+          courtlistener_gap: Number(item.courtlistener_gap || 0),
           worldtro_row_count: Number(item.worldtro_row_count || 0),
           worldtro_entries: Number(item.worldtro_entries || 0),
           pacermonitor_entries: Number(item.pacermonitor_entries || 0),

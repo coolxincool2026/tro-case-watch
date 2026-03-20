@@ -207,7 +207,7 @@
 
       .gap-summary {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 12px;
         margin-top: 14px;
       }
@@ -359,6 +359,10 @@
             <span id="gapWorldtro" class="value">-</span>
           </div>
           <div class="metric">
+            <span class="label">待补 CourtListener</span>
+            <span id="gapCourtListener" class="value">-</span>
+          </div>
+          <div class="metric">
             <span class="label">待补 PACERMonitor</span>
             <span id="gapPacerMonitor" class="value">-</span>
           </div>
@@ -384,6 +388,7 @@
       const todayCases = document.querySelector("#todayCases");
       const gapTotal = document.querySelector("#gapTotal");
       const gapWorldtro = document.querySelector("#gapWorldtro");
+      const gapCourtListener = document.querySelector("#gapCourtListener");
       const gapPacerMonitor = document.querySelector("#gapPacerMonitor");
       const gapChallenge = document.querySelector("#gapChallenge");
       const gapStatus = document.querySelector("#gapStatus");
@@ -460,6 +465,7 @@
       function renderGapList(payload) {
         gapTotal.textContent = Number(payload.summary?.total || 0).toLocaleString("zh-CN");
         gapWorldtro.textContent = Number(payload.summary?.worldtro || 0).toLocaleString("zh-CN");
+        gapCourtListener.textContent = Number(payload.summary?.courtlistener || 0).toLocaleString("zh-CN");
         gapPacerMonitor.textContent = Number(payload.summary?.pacermonitor || 0).toLocaleString("zh-CN");
         gapChallenge.textContent = Number(payload.summary?.challenge || 0).toLocaleString("zh-CN");
 
