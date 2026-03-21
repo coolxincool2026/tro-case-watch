@@ -2209,6 +2209,9 @@ export class Store {
   getCasesNeedingPriorityFeedSync(limit, staleAfterHours = 12, { preferKnownPriorityFeed = false } = {}) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
     const poolSize = Math.max(limit * 40, 400);
+    const knownPriorityFeedPoolSize = preferKnownPriorityFeed
+      ? Math.max(limit * 500, 8000)
+      : Math.max(limit * 12, 240);
     const fetchCandidateRows = (
       whereSql,
       params = [],
@@ -2250,7 +2253,7 @@ export class Store {
       `(${PRIORITY_FEED_URL_CLAUSE} OR ${PRIORITY_FEED_RAW_CLAUSE})`,
       [],
       `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, docket_count DESC, id ASC`,
-      Math.max(limit * 12, 240),
+      knownPriorityFeedPoolSize,
       { startDate: null, requirePriorityTags: false }
     ).filter((row) => hasConcretePriorityFeedLink(row) || getPriorityFeedRowCount(row) > 0);
 
@@ -2278,6 +2281,7 @@ export class Store {
           return {
             row,
             needsCompletion,
+            neverSynced: !syncedAt,
             isStale,
             isFreshlyMissing,
             shouldSync,
@@ -2290,6 +2294,10 @@ export class Store {
         .sort((left, right) => {
           if (left.needsCompletion !== right.needsCompletion) {
             return left.needsCompletion ? -1 : 1;
+          }
+
+          if (left.neverSynced !== right.neverSynced) {
+            return left.neverSynced ? -1 : 1;
           }
 
           if (left.priorityFeedRowCount !== right.priorityFeedRowCount) {
