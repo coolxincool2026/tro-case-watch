@@ -280,7 +280,7 @@
         <p class="subtitle">
           这个页面专门用来后台触发补数，不需要再靠 SSH 挂着跑。填一次
           <code>ADMIN_TOKEN</code> 后，可以直接点按钮触发
-          <code>CourtListener 官方 docket</code>、<code>WorldTRO</code>、法院官方源和律所官网补源。
+          <code>官方 docket</code>、<code>优先目录</code>、法院公开源和律所公开源补数。
         </p>
       </section>
 
@@ -296,14 +296,14 @@
             <button data-endpoint="/api/admin/sync" data-body='{"mode":"recent"}' type="button">
               跑 Recent
             </button>
-            <button data-endpoint="/api/admin/docket-backfill" type="button">
-              跑 WorldTRO
+            <button data-endpoint="/api/admin/priority-sync" type="button">
+              跑优先目录
             </button>
-            <button data-endpoint="/api/admin/pacermonitor-sync" type="button">
-              跑 PACERMonitor
+            <button data-endpoint="/api/admin/fallback-sync" type="button">
+              跑备用公开源
             </button>
-            <button data-endpoint="/api/admin/courtlistener-docket-sync" type="button">
-              跑 CourtListener Docket
+            <button data-endpoint="/api/admin/official-docket-sync" type="button">
+              跑官方 Docket
             </button>
             <button data-endpoint="/api/admin/court-feed-sync" type="button">
               跑法院源
@@ -358,15 +358,15 @@
             <span id="gapTotal" class="value">-</span>
           </div>
           <div class="metric">
-            <span class="label">待补 WorldTRO</span>
-            <span id="gapWorldtro" class="value">-</span>
+            <span class="label">待补优先目录</span>
+            <span id="gapPriority" class="value">-</span>
           </div>
           <div class="metric">
-            <span class="label">待补 CourtListener</span>
-            <span id="gapCourtListener" class="value">-</span>
+            <span class="label">待补官方 Docket</span>
+            <span id="gapOfficial" class="value">-</span>
           </div>
           <div class="metric">
-            <span class="label">待补 PACERMonitor</span>
+            <span class="label">待补备用公开源</span>
             <span id="gapPacerMonitor" class="value">-</span>
           </div>
           <div class="metric">
@@ -390,8 +390,8 @@
       const scheduleCases = document.querySelector("#scheduleCases");
       const todayCases = document.querySelector("#todayCases");
       const gapTotal = document.querySelector("#gapTotal");
-      const gapWorldtro = document.querySelector("#gapWorldtro");
-      const gapCourtListener = document.querySelector("#gapCourtListener");
+      const gapPriority = document.querySelector("#gapPriority");
+      const gapOfficial = document.querySelector("#gapOfficial");
       const gapPacerMonitor = document.querySelector("#gapPacerMonitor");
       const gapChallenge = document.querySelector("#gapChallenge");
       const gapStatus = document.querySelector("#gapStatus");
@@ -476,8 +476,8 @@
 
       function renderGapList(payload) {
         gapTotal.textContent = Number(payload.summary?.total || 0).toLocaleString("zh-CN");
-        gapWorldtro.textContent = Number(payload.summary?.worldtro || 0).toLocaleString("zh-CN");
-        gapCourtListener.textContent = Number(payload.summary?.courtlistener || 0).toLocaleString("zh-CN");
+        gapPriority.textContent = Number(payload.summary?.priority || 0).toLocaleString("zh-CN");
+        gapOfficial.textContent = Number(payload.summary?.courtlistener || 0).toLocaleString("zh-CN");
         gapPacerMonitor.textContent = Number(payload.summary?.pacermonitor || 0).toLocaleString("zh-CN");
         gapChallenge.textContent = Number(payload.summary?.challenge || 0).toLocaleString("zh-CN");
 
@@ -543,7 +543,7 @@
 
         await trigger("/api/admin/enrich-case", {
           search,
-          providers: ["courtlistener", "worldtro", "pacermonitor"]
+          providers: ["official", "priority", "fallback"]
         });
       }
 

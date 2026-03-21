@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import zlib from "node:zlib";
@@ -13,6 +14,15 @@ import { LawFirmClient } from "./providers/lawfirm.js";
 import { WorldtroClient } from "./providers/worldtro.js";
 import { PacerAdapter } from "./providers/pacer.js";
 import { PacerMonitorAdapter } from "./providers/pacermonitor.js";
+import {
+  FALLBACK_PROVIDER_KEY,
+  OFFICIAL_DOCKET_PROVIDER_KEY,
+  PRIORITY_FEED_PROVIDER_KEY,
+  PRIORITY_FEED_SOURCE,
+  caseHasPriorityFeedUrl,
+  getPriorityFeedRaw,
+  publicProviderLabel
+} from "./priority-feed.js";
 import { TranslationService } from "./translation.js";
 import { CaseSyncService } from "./sync.js";
 import { docketLooksLike } from "./insights.js";
@@ -56,6 +66,7 @@ const syncService = new CaseSyncService({
 const backgroundCaseHydrations = new Map();
 const publicResponseCache = new Map();
 const publicRateLimitBuckets = new Map();
+const browserGuardCookieName = "__tt_guard";
 
 function clearPublicResponseCache() {
   publicResponseCache.clear();
@@ -261,6 +272,16 @@ function buildApiHeaders(origin = "") {
   return headers;
 }
 
+function buildBrowserGuardSecret() {
+  const seed = [
+    config.server.adminToken || "",
+    config.dbPath || "",
+    config.server.port || "",
+    "public-browser-guard"
+  ].join("|");
+  return crypto.createHash("sha256").update(seed).digest("hex");
+}
+
 function normalizeHostHeader(value = "") {
   return String(value || "")
     .trim()
@@ -305,6 +326,83 @@ function getClientIp(request) {
     .map((item) => item.trim())
     .filter(Boolean)[0];
   return forwarded || request.socket?.remoteAddress || "unknown";
+}
+
+function parseCookies(request) {
+  const raw = String(request.headers.cookie || "");
+  if (!raw) {
+    return {};
+  }
+
+  return raw
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .reduce((acc, item) => {
+      const separator = item.indexOf("=");
+      if (separator === -1) {
+        return acc;
+      }
+
+      const key = item.slice(0, separator).trim();
+      const value = item.slice(separator + 1).trim();
+      if (key) {
+        acc[key] = decodeURIComponent(value);
+      }
+      return acc;
+    }, {});
+}
+
+function fingerprintClient(request) {
+  return crypto
+    .createHash("sha256")
+    .update(`${getClientIp(request)}|${String(request.headers["user-agent"] || "")}`)
+    .digest("base64url");
+}
+
+function createBrowserGuardToken(request, expiresAtMs) {
+  const body = `${Math.floor(expiresAtMs)}.${fingerprintClient(request)}`;
+  const signature = crypto
+    .createHmac("sha256", buildBrowserGuardSecret())
+    .update(body)
+    .digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function hasValidBrowserGuard(request) {
+  if (authorize(request)) {
+    return true;
+  }
+
+  const token = parseCookies(request)[browserGuardCookieName];
+  if (!token) {
+    return false;
+  }
+
+  const [expiresAtRaw, fingerprint, signature] = String(token).split(".");
+  const expiresAt = Number(expiresAtRaw || 0);
+  if (!expiresAt || !fingerprint || !signature || expiresAt <= Date.now()) {
+    return false;
+  }
+
+  const body = `${expiresAt}.${fingerprint}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", buildBrowserGuardSecret())
+    .update(body)
+    .digest("base64url");
+
+  if (signature !== expectedSignature) {
+    return false;
+  }
+
+  return fingerprint === fingerprintClient(request);
+}
+
+function attachBrowserGuardCookie(request, headers = {}) {
+  const maxAgeSeconds = 2 * 60 * 60;
+  const expiresAtMs = Date.now() + maxAgeSeconds * 1000;
+  headers["set-cookie"] = `${browserGuardCookieName}=${encodeURIComponent(createBrowserGuardToken(request, expiresAtMs))}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`;
+  return headers;
 }
 
 function isSuspiciousUserAgent(request) {
@@ -403,6 +501,26 @@ function enforcePublicReadRateLimit(request, response, pathname) {
   response.end(JSON.stringify({
     error: "Too many requests",
     retry_after_seconds: retryAfter
+  }));
+  return true;
+}
+
+function requiresBrowserGuard(pathname = "") {
+  return pathname === "/api/cases" || pathname.startsWith("/api/cases/") || pathname === "/api/sync/status";
+}
+
+function enforceBrowserGuard(request, response, pathname) {
+  if (request.method !== "GET" || !requiresBrowserGuard(pathname) || authorize(request)) {
+    return false;
+  }
+
+  if (hasValidBrowserGuard(request)) {
+    return false;
+  }
+
+  response.writeHead(403, buildApiHeaders());
+  response.end(JSON.stringify({
+    error: "Browser session required"
   }));
   return true;
 }
@@ -511,7 +629,7 @@ function sanitizeEntryDocumentType(value) {
     return "Docket Entry";
   }
 
-  if (/worldtro/i.test(type)) {
+  if (new RegExp(PRIORITY_FEED_SOURCE, "i").test(type) || /priority|catalog/i.test(type)) {
     return "Docket Entry";
   }
 
@@ -523,7 +641,9 @@ function sanitizeEntryDocumentType(value) {
     return "Docket Document";
   }
 
-  return type.replace(/worldtro/gi, "Docket").replace(/pacermonitor/gi, "Docket");
+  return type
+    .replace(new RegExp(PRIORITY_FEED_SOURCE, "gi"), "Docket")
+    .replace(/pacermonitor/gi, "Docket");
 }
 
 function normalizeDisplayNumber(value) {
@@ -544,15 +664,15 @@ function sanitizeTimelineLabel(entry = {}) {
 }
 
 function hasWorldtroCoverage(item = {}) {
-  if (Number(item.raw?.worldtro?.rowCount || 0) > 0) {
+  if (Number(getPriorityFeedRaw(item.raw)?.rowCount || 0) > 0) {
     return true;
   }
 
-  if (Array.isArray(item.source_urls) && item.source_urls.some((url) => String(url || "").includes("worldtro.com"))) {
+  if (caseHasPriorityFeedUrl(item)) {
     return true;
   }
 
-  return Array.isArray(item.entries) && item.entries.some((entry) => entry.primary_source === "worldtro");
+  return Array.isArray(item.entries) && item.entries.some((entry) => entry.primary_source === PRIORITY_FEED_SOURCE);
 }
 
 function shouldHydrateWorldtroOnDemand(item = {}) {
@@ -561,7 +681,7 @@ function shouldHydrateWorldtroOnDemand(item = {}) {
   }
 
   const entryCount = Number(item.entries?.length || 0);
-  const worldtroRowCount = Number(item.raw?.worldtro?.rowCount || 0);
+  const worldtroRowCount = Number(getPriorityFeedRaw(item.raw)?.rowCount || 0);
   const minimumExpectedEntries = Math.max(12, Number(item.docket_count || 0), 6);
 
   if (!hasWorldtroCoverage(item)) {
@@ -572,7 +692,7 @@ function shouldHydrateWorldtroOnDemand(item = {}) {
 }
 
 function shouldForceWorldtroRefresh(item = {}) {
-  const worldtroRowCount = Number(item.raw?.worldtro?.rowCount || 0);
+  const worldtroRowCount = Number(getPriorityFeedRaw(item.raw)?.rowCount || 0);
   return worldtroRowCount > 0 && Number(item.entries?.length || 0) < worldtroRowCount;
 }
 
@@ -589,7 +709,7 @@ function shouldHydrateCourtListenerOnDemand(item = {}) {
     item.insights?.is_tro_case ? 10 : 0,
     item.insights?.is_schedule_a_case ? 10 : 0,
     Number(item.docket_count || 0),
-    Number(item.raw?.worldtro?.rowCount || 0),
+    Number(getPriorityFeedRaw(item.raw)?.rowCount || 0),
     latestNumber
   );
 
@@ -619,7 +739,7 @@ function shouldHydratePacerMonitorOnDemand(item = {}) {
   const expectedEntries = Math.max(
     10,
     Number(item.docket_count || 0),
-    Number(item.raw?.worldtro?.rowCount || 0),
+    Number(getPriorityFeedRaw(item.raw)?.rowCount || 0),
     6
   );
 
@@ -650,7 +770,7 @@ function buildCaseHydrationPlan(item = {}) {
   return {
     pending: courtlistener || worldtro || pacermonitor,
     courtlistener,
-    worldtro,
+    priority: worldtro,
     pacermonitor
   };
 }
@@ -677,7 +797,7 @@ function queueCaseHydration(caseId, initialItem) {
       }
     }
 
-    if (plan.worldtro && shouldHydrateWorldtroOnDemand(current)) {
+    if (plan.priority && shouldHydrateWorldtroOnDemand(current)) {
       try {
         await syncService.enrichCaseWithWorldtro(caseId, {
           force: shouldForceWorldtroRefresh(current)
@@ -745,8 +865,8 @@ function serializePublicCaseDetail(item = {}) {
     hydration_pending: item.hydration_pending
       ? {
           pending: Boolean(item.hydration_pending.pending),
-          worldtro: Boolean(item.hydration_pending.worldtro),
-          pacermonitor: Boolean(item.hydration_pending.pacermonitor)
+          priority: Boolean(item.hydration_pending.priority),
+          fallback: Boolean(item.hydration_pending.pacermonitor)
         }
       : null,
     entries: Array.isArray(item.entries) ? item.entries.map(serializePublicEntry) : []
@@ -821,13 +941,21 @@ function serializeAdminStatus(status = {}) {
   return {
     ...serializePublicStatus(status),
     providers: {
-      courtfeeds: status.providers?.courtfeeds || null,
-      lawfirms: status.providers?.lawfirms || null,
-      worldtro: status.providers?.worldtro || null,
-      pacermonitor: status.providers?.pacermonitor || null,
-      pacer: status.providers?.pacer || null,
-      courtlistener: status.providers?.courtlistener || null,
-      translation: status.providers?.translation || null
+      priority: status.providers?.worldtro
+        ? { enabled: Boolean(status.providers.worldtro.enabled), state: status.providers.worldtro.state || null }
+        : null,
+      official: status.providers?.courtlistener
+        ? { enabled: Boolean(status.providers.courtlistener.enabled), state: status.providers.courtlistener.state || null }
+        : null,
+      fallback: status.providers?.pacermonitor
+        ? { enabled: Boolean(status.providers.pacermonitor.enabled), state: status.providers.pacermonitor.state || null }
+        : null,
+      courtfeeds: status.providers?.courtfeeds
+        ? { enabled: Boolean(status.providers.courtfeeds.enabled), state: status.providers.courtfeeds.state || null }
+        : null,
+      advisories: status.providers?.lawfirms
+        ? { enabled: Boolean(status.providers.lawfirms.enabled), state: status.providers.lawfirms.state || null }
+        : null
     }
   };
 }
@@ -837,7 +965,7 @@ function serializeGapPayload(payload = {}) {
     summary: {
       total: Number(payload.summary?.total || 0),
       courtlistener: Number(payload.summary?.courtlistener || 0),
-      worldtro: Number(payload.summary?.worldtro || 0),
+      priority: Number(payload.summary?.worldtro || 0),
       pacermonitor: Number(payload.summary?.pacermonitor || 0),
       challenge: Number(payload.summary?.challenge || 0)
     },
@@ -856,16 +984,24 @@ function serializeGapPayload(payload = {}) {
           expected_entries: Number(item.expected_entries || 0),
           gap: Number(item.gap || 0),
           courtlistener_gap: Number(item.courtlistener_gap || 0),
-          worldtro_row_count: Number(item.worldtro_row_count || 0),
-          worldtro_entries: Number(item.worldtro_entries || 0),
+          priority_row_count: Number(item.worldtro_row_count || 0),
+          priority_entries: Number(item.worldtro_entries || 0),
           pacermonitor_entries: Number(item.pacermonitor_entries || 0),
-          worldtro_synced_at: item.worldtro_synced_at || null,
+          priority_synced_at: item.worldtro_synced_at || null,
           pacermonitor_synced_at: item.pacermonitor_synced_at || null,
           pacermonitor_state: item.pacermonitor_state || null,
           is_recent_case: Boolean(item.is_recent_case),
-          providers_needed: Array.isArray(item.providers_needed) ? item.providers_needed : [],
-          reasons: Array.isArray(item.reasons) ? item.reasons : [],
-          source_urls: Array.isArray(item.source_urls) ? item.source_urls : []
+          providers_needed: Array.isArray(item.providers_needed)
+            ? item.providers_needed.map((value) => publicProviderLabel(value))
+            : [],
+          reasons: Array.isArray(item.reasons)
+            ? item.reasons.map((value) =>
+                String(value || "")
+                  .replace(new RegExp(PRIORITY_FEED_SOURCE, "gi"), PRIORITY_FEED_PUBLIC_LABEL)
+                  .replace(/courtlistener/gi, "官方摘要")
+                  .replace(/pacermonitor/gi, "备用公开源")
+              )
+            : []
         }))
       : []
   };
@@ -918,6 +1054,10 @@ async function handleApi(request, response, pathname, searchParams) {
   }
 
   if (enforcePublicReadRateLimit(request, response, pathname)) {
+    return;
+  }
+
+  if (enforceBrowserGuard(request, response, pathname)) {
     return;
   }
 
@@ -1069,21 +1209,21 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
-  if (request.method === "POST" && pathname === "/api/admin/docket-backfill") {
+  if (request.method === "POST" && pathname === "/api/admin/priority-sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
 
-    spawnDetachedTask(["--sync-only", "worldtro"]);
+    spawnDetachedTask(["--sync-only", "catalog"]);
     clearPublicResponseCache();
 
     return sendJson(response, 202, {
       accepted: true,
-      mode: "docket-backfill"
+      mode: "priority-sync"
     });
   }
 
-  if (request.method === "POST" && pathname === "/api/admin/pacermonitor-sync") {
+  if (request.method === "POST" && pathname === "/api/admin/fallback-sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
@@ -1093,11 +1233,11 @@ async function handleApi(request, response, pathname, searchParams) {
 
     return sendJson(response, 202, {
       accepted: true,
-      mode: "pacermonitor-sync"
+      mode: "fallback-sync"
     });
   }
 
-  if (request.method === "POST" && pathname === "/api/admin/courtlistener-docket-sync") {
+  if (request.method === "POST" && pathname === "/api/admin/official-docket-sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
@@ -1107,7 +1247,7 @@ async function handleApi(request, response, pathname, searchParams) {
 
     return sendJson(response, 202, {
       accepted: true,
-      mode: "courtlistener-docket-sync"
+      mode: "official-docket-sync"
     });
   }
 
@@ -1135,7 +1275,7 @@ async function handleApi(request, response, pathname, searchParams) {
 
     return sendJson(response, 202, {
       accepted: true,
-      mode: "law-firm-sync"
+      mode: "advisory-sync"
     });
   }
 
@@ -1164,12 +1304,27 @@ async function handleApi(request, response, pathname, searchParams) {
     const body = await readRequestBody(request);
     const requestedProviders = Array.isArray(body.providers)
       ? body.providers
-      : ["courtlistener", "worldtro", "pacermonitor"];
+      : [OFFICIAL_DOCKET_PROVIDER_KEY, PRIORITY_FEED_PROVIDER_KEY, FALLBACK_PROVIDER_KEY];
     const providers = [...new Set(
       requestedProviders.filter((item) =>
-        item === "courtlistener" || item === "worldtro" || item === "pacermonitor"
+        item === "courtlistener" ||
+        item === "pacermonitor" ||
+        item === OFFICIAL_DOCKET_PROVIDER_KEY ||
+        item === PRIORITY_FEED_PROVIDER_KEY ||
+        item === FALLBACK_PROVIDER_KEY
       )
-    )];
+    )].map((item) => {
+      if (item === OFFICIAL_DOCKET_PROVIDER_KEY) {
+        return "courtlistener";
+      }
+      if (item === PRIORITY_FEED_PROVIDER_KEY) {
+        return PRIORITY_FEED_SOURCE;
+      }
+      if (item === FALLBACK_PROVIDER_KEY) {
+        return "pacermonitor";
+      }
+      return item;
+    });
 
     let item = Number(body.caseId) > 0 ? store.getCase(Number(body.caseId)) : null;
     if (!item && body.search) {
@@ -1210,7 +1365,7 @@ async function handleApi(request, response, pathname, searchParams) {
   sendJson(response, 404, { error: "Not found" });
 }
 
-function serveStatic(response, pathname) {
+function serveStatic(request, response, pathname) {
   const target = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.join(config.publicDir, target);
 
@@ -1222,10 +1377,10 @@ function serveStatic(response, pathname) {
 
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
     const fallback = path.join(config.publicDir, "index.html");
-    response.writeHead(200, {
+    response.writeHead(200, attachBrowserGuardCookie(request, {
       "content-type": "text/html; charset=utf-8",
       "x-content-type-options": "nosniff"
-    });
+    }));
     response.end(fs.readFileSync(fallback));
     return;
   }
@@ -1241,6 +1396,9 @@ function serveStatic(response, pathname) {
   }
 
   headers["x-content-type-options"] = "nosniff";
+  if (extension === ".html") {
+    attachBrowserGuardCookie(request, headers);
+  }
   response.writeHead(200, headers);
   response.end(fs.readFileSync(filePath));
 }
@@ -1263,7 +1421,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    serveStatic(response, url.pathname);
+    serveStatic(request, response, url.pathname);
   } catch (error) {
     console.error("[server]", error);
     sendJson(response, 500, { error: error.message });
@@ -1280,13 +1438,13 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["courtlistener", "worldtro", "pacermonitor"];
+      : ["courtlistener", PRIORITY_FEED_SOURCE, "pacermonitor"];
 
     if (providers.includes("courtlistener")) {
       await syncService.enrichCaseWithCourtListener(caseId, { force: true });
     }
 
-    if (providers.includes("worldtro")) {
+    if (providers.includes(PRIORITY_FEED_SOURCE)) {
       await syncService.enrichCaseWithWorldtro(caseId, { force: true });
     }
 
@@ -1301,13 +1459,13 @@ async function main() {
   const syncOnlyIndex = process.argv.indexOf("--sync-only");
   if (syncOnlyIndex !== -1) {
     const rawMode = process.argv[syncOnlyIndex + 1];
-    if (rawMode === "worldtro") {
+    if (rawMode === "catalog") {
       const result = await syncService.syncWorldtroRecent("backfill");
-      console.log(`[sync] completed worldtro ${JSON.stringify(result)}`);
+      console.log(`[sync] completed catalog ${JSON.stringify(result)}`);
       process.exit(0);
     }
 
-    if (rawMode === "worldtro-until-idle") {
+    if (rawMode === "catalog-until-idle") {
       const maxRoundsIndex = process.argv.indexOf("--max-rounds");
       const idleRoundsIndex = process.argv.indexOf("--idle-rounds");
       const sleepMsIndex = process.argv.indexOf("--sleep-ms");
@@ -1341,7 +1499,7 @@ async function main() {
         const idleRound = Number(result.syncedCases || 0) === 0 && Number(result.discoveredCases || 0) === 0;
         idleStreak = idleRound ? idleStreak + 1 : 0;
 
-        console.log(`[sync] worldtro round ${rounds} ${JSON.stringify({
+        console.log(`[sync] catalog round ${rounds} ${JSON.stringify({
           ...result,
           idleRound,
           idleStreak
@@ -1356,7 +1514,7 @@ async function main() {
         }
       }
 
-      console.log(`[sync] completed worldtro-until-idle ${JSON.stringify({
+      console.log(`[sync] completed catalog-until-idle ${JSON.stringify({
         rounds,
         idleStreak,
         maxRounds,

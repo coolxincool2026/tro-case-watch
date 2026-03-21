@@ -193,15 +193,11 @@ function displayEntryType(entry) {
     return "Docket Entry";
   }
 
-  if (/worldtro/i.test(type)) {
-    return "Docket Entry";
-  }
-
   if (/pacer document/i.test(type)) {
     return "Docket Document";
   }
 
-  return type.replace(/worldtro/gi, "Docket");
+  return type;
 }
 
 function renderCaseRow(item) {

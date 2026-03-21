@@ -9,8 +9,8 @@
     "dev": "node --watch src/server.js",
     "sync:recent": "node src/server.js --sync-only recent",
     "sync:backfill": "node src/server.js --sync-only backfill",
-    "sync:worldtro": "node src/server.js --sync-only worldtro",
-    "sync:worldtro:drain": "node src/server.js --sync-only worldtro-until-idle",
+    "sync:catalog": "node src/server.js --sync-only catalog",
+    "sync:catalog:drain": "node src/server.js --sync-only catalog-until-idle",
     "sync:courts": "node src/server.js --sync-only courtfeeds",
     "sync:lawfirms": "node src/server.js --sync-only lawfirms"
   }
