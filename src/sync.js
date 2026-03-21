@@ -110,7 +110,7 @@ function buildCourtDocketKey(courtId, docketNumber) {
     return "";
   }
 
-  const normalizedCourt = normalizeLookupText(courtId);
+  const normalizedCourt = normalizeCourtLookupText(courtId);
   if (!normalizedCourt) {
     return "";
   }

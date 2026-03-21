@@ -126,6 +126,50 @@ function parseDate(value) {
   return `${match[3]}-${match[1]}-${match[2]}`;
 }
 
+function parseIsoDateMs(value) {
+  const ms = Date.parse(String(value || ""));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function normalizeLookupText(value) {
+  return cleanText(value).toLowerCase().replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function collectExpectedTokens(caseRow) {
+  const blob = [
+    caseRow?.case_name,
+    ...(Array.isArray(caseRow?.plaintiffs) ? caseRow.plaintiffs : []),
+    ...(Array.isArray(caseRow?.defendants) ? caseRow.defendants : [])
+  ]
+    .map((item) => normalizeLookupText(item))
+    .filter(Boolean)
+    .join(" ");
+
+  const stop = new Set([
+    "plaintiff",
+    "defendant",
+    "llc",
+    "inc",
+    "ltd",
+    "et",
+    "al",
+    "company",
+    "corp",
+    "corporation"
+  ]);
+
+  return [...new Set(
+    blob
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter((item) => item.length >= 4 && !stop.has(item))
+  )];
+}
+
+function looksLikeForeignNamedEntity(text) {
+  return /\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})+\b/.test(String(text || ""));
+}
+
 export class WorldtroClient {
   constructor(config) {
     this.enabled = Boolean(config.enabled);
@@ -179,11 +223,17 @@ export class WorldtroClient {
 
     const pageUrl = new URL(pagePath, `${this.baseUrl}/`).toString();
     const html = await this.fetchText(pageUrl);
-    return this.parseCasePage(html, pageUrl, {
+    const payload = this.parseCasePage(html, pageUrl, {
       stateCode,
       year: docket.year,
       serial: docket.serial
     });
+
+    if (!this.isPlausiblePayload(caseRow, payload)) {
+      return null;
+    }
+
+    return payload;
   }
 
   async lookupCasePath({ stateCode, year, serial }) {
@@ -255,6 +305,41 @@ export class WorldtroClient {
       serial: meta.serial,
       syncedAt: new Date().toISOString()
     };
+  }
+
+  isPlausiblePayload(caseRow, payload) {
+    if (!payload || !Array.isArray(payload.entries) || !payload.entries.length) {
+      return Boolean(payload);
+    }
+
+    const caseFiledMs = parseIsoDateMs(caseRow?.date_filed);
+    const datedEntries = payload.entries
+      .map((entry) => ({ ...entry, filedAtMs: parseIsoDateMs(entry.filed_at) }))
+      .filter((entry) => entry.filedAtMs !== null);
+
+    if (caseFiledMs !== null && datedEntries.length) {
+      const earliestMs = Math.min(...datedEntries.map((entry) => entry.filedAtMs));
+      if (earliestMs < caseFiledMs - 24 * 60 * 60 * 1000) {
+        return false;
+      }
+    }
+
+    const expectedTokens = collectExpectedTokens(caseRow);
+    if (!expectedTokens.length) {
+      return true;
+    }
+
+    const sampleText = payload.entries
+      .slice(0, 8)
+      .map((entry) => String(entry.description || ""))
+      .join(" ");
+    const normalizedSample = normalizeLookupText(sampleText);
+    const tokenHits = expectedTokens.filter((token) => normalizedSample.includes(token)).length;
+    if (tokenHits > 0) {
+      return true;
+    }
+
+    return !looksLikeForeignNamedEntity(sampleText);
   }
 
   async fetchJson(url, options = {}) {

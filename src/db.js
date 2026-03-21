@@ -95,8 +95,68 @@ function compareIsoDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
 
+function laterIso(left, right) {
+  if (!left) {
+    return right || null;
+  }
+
+  if (!right) {
+    return left || null;
+  }
+
+  return String(left).localeCompare(String(right)) >= 0 ? left : right;
+}
+
+function higherOrderValue(left, right) {
+  const leftNumber = parseDocketNumber(left);
+  const rightNumber = parseDocketNumber(right);
+  if (!leftNumber) {
+    return right || null;
+  }
+
+  if (!rightNumber) {
+    return left || null;
+  }
+
+  return rightNumber > leftNumber ? right : left;
+}
+
 function normalizeLookupText(value) {
   return normalizeText(value).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+const DISTRICT_DIRECTION_MAP = {
+  N: "Northern",
+  S: "Southern",
+  E: "Eastern",
+  W: "Western",
+  C: "Central",
+  M: "Middle"
+};
+
+function expandCourtLabel(value) {
+  return String(value || "")
+    .replace(/\b([NSEWCM])\s*\.?\s*D\.?\s+([A-Za-z][A-Za-z .-]+)/gi, (_, direction, place) => {
+      const prefix = DISTRICT_DIRECTION_MAP[String(direction || "").toUpperCase()] || direction;
+      return `${prefix} District of ${String(place || "").trim()}`;
+    })
+    .replace(/\bD\.?\s+([A-Za-z][A-Za-z .-]+)/gi, (_, place) => `District of ${String(place || "").trim()}`)
+    .replace(/\bU\.?S\.?\b/gi, "United States")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeCourtLookupText(value) {
+  return normalizeLookupText(
+    expandCourtLabel(value)
+      .replace(/\bDistrict Court,?\s*/gi, "")
+      .replace(/\bDistrict Court for the\b/gi, "")
+      .replace(/\bUnited States\b/gi, "")
+  );
+}
+
+function buildCanonicalCourtKey(caseLike) {
+  return normalizeCourtLookupText(caseLike?.court_name) || normalizeLookupText(caseLike?.court_id);
 }
 
 function buildCaseIdentityKeys(caseLike) {
@@ -107,7 +167,7 @@ function buildCaseIdentityKeys(caseLike) {
 
   const keys = new Set();
   const courtIdKey = normalizeLookupText(caseLike?.court_id);
-  const courtNameKey = normalizeLookupText(caseLike?.court_name);
+  const courtNameKey = normalizeCourtLookupText(caseLike?.court_name);
 
   if (courtIdKey) {
     keys.add(`${courtIdKey}|${docketKey}`);
@@ -118,6 +178,16 @@ function buildCaseIdentityKeys(caseLike) {
   }
 
   return [...keys];
+}
+
+function buildCanonicalCaseGroupKey(caseLike) {
+  const docketKey = normalizeDocket(caseLike?.docket_number);
+  const courtKey = buildCanonicalCourtKey(caseLike);
+  if (!docketKey || !courtKey) {
+    return "";
+  }
+
+  return `${courtKey}|${docketKey}`;
 }
 
 const shanghaiDateFormatter = new Intl.DateTimeFormat("en-CA", {
@@ -169,6 +239,199 @@ function buildCaseView(row) {
       ...(hydrated.plaintiffs || []),
       ...(hydrated.defendants || [])
     ].join(" | "))
+  };
+}
+
+function caseSourceRank(caseLike = {}) {
+  switch (String(caseLike.primary_source || "").toLowerCase()) {
+    case "sriplaw":
+    case "gbc":
+      return 6;
+    case "worldtro":
+      return 5;
+    case "courtfeed":
+      return 4;
+    case "courtlistener":
+      return 3;
+    case "pacermonitor":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function compareCaseRowsForCanonicalChoice(left, right) {
+  const leftTroScore =
+    (left.insights?.is_tro_case ? 4 : 0) +
+    (left.insights?.is_schedule_a_case ? 3 : 0) +
+    (left.insights?.is_seller_case ? 2 : 0);
+  const rightTroScore =
+    (right.insights?.is_tro_case ? 4 : 0) +
+    (right.insights?.is_schedule_a_case ? 3 : 0) +
+    (right.insights?.is_seller_case ? 2 : 0);
+  if (leftTroScore !== rightTroScore) {
+    return rightTroScore - leftTroScore;
+  }
+
+  const leftEntries = Number(left.entries?.length || 0);
+  const rightEntries = Number(right.entries?.length || 0);
+  if (leftEntries !== rightEntries) {
+    return rightEntries - leftEntries;
+  }
+
+  const leftDocketCount = Number(left.docket_count || 0);
+  const rightDocketCount = Number(right.docket_count || 0);
+  if (leftDocketCount !== rightDocketCount) {
+    return rightDocketCount - leftDocketCount;
+  }
+
+  const sourceRankDiff = caseSourceRank(right) - caseSourceRank(left);
+  if (sourceRankDiff !== 0) {
+    return sourceRankDiff;
+  }
+
+  return (
+    compareIsoDesc(
+      left.latest_docket_filed_at || left.date_filed || left.updated_at,
+      right.latest_docket_filed_at || right.date_filed || right.updated_at
+    ) ||
+    compareIsoDesc(left.updated_at, right.updated_at)
+  );
+}
+
+function mergeArraysNormalized(...lists) {
+  const merged = new Map();
+  for (const list of lists) {
+    for (const item of Array.isArray(list) ? list : []) {
+      const value = String(item || "").trim();
+      const key = normalizeText(value).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+      if (!value || !key || merged.has(key)) {
+        continue;
+      }
+      merged.set(key, value);
+    }
+  }
+  return [...merged.values()];
+}
+
+function mergeCaseRaw(group) {
+  const merged = {};
+  for (const item of group) {
+    const raw = item?.raw || {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        merged[key] &&
+        typeof merged[key] === "object" &&
+        !Array.isArray(merged[key])
+      ) {
+        merged[key] = {
+          ...merged[key],
+          ...value
+        };
+      } else if (value !== undefined) {
+        merged[key] = value;
+      }
+    }
+  }
+  return merged;
+}
+
+function mergeDuplicateCaseGroup(group) {
+  if (group.length === 1) {
+    return group[0];
+  }
+
+  const ordered = [...group].sort(compareCaseRowsForCanonicalChoice);
+  const canonical = ordered[0];
+  const merged = {
+    ...canonical,
+    courtlistener_docket_id:
+      canonical.courtlistener_docket_id || ordered.find((item) => item.courtlistener_docket_id)?.courtlistener_docket_id || null,
+    pacer_case_id: canonical.pacer_case_id || ordered.find((item) => item.pacer_case_id)?.pacer_case_id || null,
+    court_id: canonical.court_id || ordered.find((item) => item.court_id)?.court_id || null,
+    court_name: canonical.court_name || ordered.find((item) => item.court_name)?.court_name || null,
+    case_name: canonical.case_name || ordered.find((item) => item.case_name)?.case_name || null,
+    primary_source: canonical.primary_source,
+    source_urls: mergeArraysNormalized(...ordered.map((item) => item.source_urls)),
+    plaintiffs: mergeArraysNormalized(...ordered.map((item) => item.plaintiffs)),
+    defendants: mergeArraysNormalized(...ordered.map((item) => item.defendants)),
+    entries: dedupeEntries(ordered.flatMap((item) => item.entries || [])),
+    raw: mergeCaseRaw(ordered),
+    latest_docket_filed_at: ordered.reduce(
+      (acc, item) => laterIso(acc, item.latest_docket_filed_at),
+      canonical.latest_docket_filed_at || null
+    ),
+    latest_docket_number: ordered.reduce(
+      (acc, item) => higherOrderValue(acc, item.latest_docket_number),
+      canonical.latest_docket_number || null
+    ),
+    docket_count: Math.max(...ordered.map((item) => Number(item.docket_count || 0)), Number(canonical.docket_count || 0))
+  };
+
+  merged.insights = deriveCaseInsights(merged);
+  merged._search_blob = normalizeText([
+    merged.case_name,
+    merged.case_name_zh,
+    merged.docket_number,
+    normalizeDocket(merged.docket_number),
+    merged.court_name,
+    merged.recent_activity_summary,
+    merged.recent_activity_summary_zh,
+    merged.insights?.brand_name,
+    merged.insights?.lead_law_firm,
+    ...(merged.plaintiffs || []),
+    ...(merged.defendants || [])
+  ].join(" | "));
+  merged._label_blob = normalizeText([
+    merged.case_name,
+    merged.insights?.brand_name,
+    merged.insights?.lead_law_firm,
+    ...(merged.plaintiffs || []),
+    ...(merged.defendants || [])
+  ].join(" | "));
+  return merged;
+}
+
+function collapseDuplicateCases(rows) {
+  const grouped = new Map();
+  const passthrough = [];
+
+  for (const row of rows) {
+    const key = buildCanonicalCaseGroupKey(row);
+    if (!key) {
+      passthrough.push(row);
+      continue;
+    }
+
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(row);
+  }
+
+  const merged = [...grouped.values()].map(mergeDuplicateCaseGroup);
+  const combined = [...passthrough, ...merged];
+  combined.sort((left, right) =>
+    compareIsoDesc(
+      left.latest_docket_filed_at || left.date_filed || left.updated_at,
+      right.latest_docket_filed_at || right.date_filed || right.updated_at
+    ) || compareIsoDesc(left.updated_at, right.updated_at)
+  );
+  return combined;
+}
+
+function buildDocketSearchNeedles(rawSearch) {
+  const rawNeedle = normalizeText(rawSearch || "");
+  const docketNeedle = normalizeDocket(rawSearch);
+  const numericSuffix = String(rawSearch || "").match(/(\d{4,6})$/)?.[1] || "";
+  const exactNeedles = [...new Set([rawNeedle, docketNeedle].filter(Boolean))];
+  const suffixNeedles = [...new Set([rawNeedle, docketNeedle, numericSuffix].filter(Boolean))];
+  return {
+    exactNeedles,
+    suffixNeedles
   };
 }
 
@@ -591,12 +854,14 @@ export class Store {
       .all(cacheKey)
       .map(buildCaseView);
 
+    const collapsedRows = collapseDuplicateCases(rows);
+
     this.caseViewCache.set(cacheKey, {
       version: this.caseCacheVersion,
-      rows
+      rows: collapsedRows
     });
 
-    return rows;
+    return collapsedRows;
   }
 
   upsertCase(record) {
@@ -837,11 +1102,7 @@ export class Store {
   }
 
   getFastPathDocketCases(startDate, rawSearch) {
-    const rawNeedle = normalizeText(rawSearch || "");
-    const docketNeedle = normalizeDocket(rawSearch);
-    const numericSuffix = String(rawSearch || "").match(/(\d{4,6})$/)?.[1] || "";
-    const exactNeedles = [...new Set([rawNeedle, docketNeedle].filter(Boolean))];
-    const suffixNeedles = [...new Set([rawNeedle, docketNeedle, numericSuffix].filter(Boolean))];
+    const { exactNeedles, suffixNeedles } = buildDocketSearchNeedles(rawSearch);
     const clauses = [];
     const params = [startDate];
 
@@ -859,7 +1120,7 @@ export class Store {
       return [];
     }
 
-    return this.db
+    const rows = this.db
       .prepare(`
         SELECT *
         FROM cases
@@ -870,6 +1131,8 @@ export class Store {
       `)
       .all(...params)
       .map(buildCaseView);
+
+    return collapseDuplicateCases(rows);
   }
 
   buildCategoryWhereClause(category) {
@@ -1047,23 +1310,55 @@ export class Store {
       return null;
     }
 
+    const canonicalGroupKey = buildCanonicalCaseGroupKey(row);
+    const { exactNeedles, suffixNeedles } = buildDocketSearchNeedles(row.docket_number);
+    const clauses = [];
+    const params = [];
+
+    for (const needle of exactNeedles) {
+      clauses.push("lower(docket_number) = ?");
+      params.push(needle);
+    }
+
+    for (const needle of suffixNeedles) {
+      clauses.push("lower(docket_number) LIKE ?");
+      params.push(`%${needle}`);
+    }
+
+    const matchedPeerRows = clauses.length
+      ? this.db
+          .prepare(`
+            SELECT *
+            FROM cases
+            WHERE ${clauses.join(" OR ")}
+            LIMIT 250
+          `)
+          .all(...params)
+          .map(hydrateCase)
+          .filter((candidate) => buildCanonicalCaseGroupKey(candidate) === canonicalGroupKey)
+      : [row];
+    const peerRows = matchedPeerRows.length ? matchedPeerRows : [row];
+
+    const canonicalRow = mergeDuplicateCaseGroup(peerRows.map(buildCaseView));
+    const peerIds = [...new Set(peerRows.map((candidate) => Number(candidate.id)).filter((value) => Number.isFinite(value) && value > 0))];
+    const placeholders = peerIds.map(() => "?").join(", ");
     const entries = this.db
       .prepare(`
         SELECT *
         FROM docket_entries
-        WHERE case_id = ?
+        WHERE case_id IN (${placeholders})
         ORDER BY COALESCE(filed_at, created_at) DESC, id DESC
       `)
-      .all(id)
+      .all(...peerIds)
       .map(hydrateEntry);
 
     const uniqueEntries = dedupeEntries(entries);
 
     const detail = {
-      ...row,
+      ...canonicalRow,
       entries: uniqueEntries,
       insights: deriveCaseInsights({
-        ...row,
+        ...canonicalRow,
         entries: uniqueEntries
       })
     };
