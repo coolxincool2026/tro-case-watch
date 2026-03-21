@@ -1135,6 +1135,23 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/reconcile-duplicates") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    const body = await readRequestBody(request);
+    const limit = Math.min(Math.max(Number(body.limit || 100), 1), 500);
+    spawnDetachedTask(["--sync-only", "reconcile-duplicates", "--limit", String(limit)]);
+    clearPublicResponseCache();
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "reconcile-duplicates",
+      limit
+    });
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/enrich-case") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
@@ -1307,6 +1324,18 @@ async function main() {
     if (rawMode === "courtlistener-docket") {
       const result = await syncService.syncCourtListenerDockets();
       console.log(`[sync] completed courtlistener-docket ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "reconcile-duplicates") {
+      const limitIndex = process.argv.indexOf("--limit");
+      const limit = limitIndex !== -1 ? Math.min(Math.max(Number(process.argv[limitIndex + 1] || 100), 1), 500) : 100;
+      const result = await store.reconcileDuplicateCases({
+        startDate: config.sync.startDate,
+        category: "watchlist",
+        limit
+      });
+      console.log(`[sync] completed reconcile-duplicates ${JSON.stringify(result)}`);
       process.exit(0);
     }
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { deriveCaseInsights, normalizeDocket, normalizeText } from "./insights.js";
+import { buildTagsMarker } from "./queries.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -810,7 +811,7 @@ export class Store {
     const index = this.getCaseIdentityIndex(startDate);
     const candidateKeys = [
       `${normalizeLookupText(courtId)}|${docketKey}`,
-      `${normalizeLookupText(courtName)}|${docketKey}`
+      `${normalizeCourtLookupText(courtName)}|${docketKey}`
     ].filter((value) => !value.startsWith("|"));
 
     for (const key of candidateKeys) {
@@ -862,6 +863,165 @@ export class Store {
     });
 
     return collapsedRows;
+  }
+
+  getRawCaseViews(startDate = "2025-01-01") {
+    return this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date(?)
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+      `)
+      .all(String(startDate || "2025-01-01"))
+      .map(buildCaseView);
+  }
+
+  getDuplicateCaseGroups(limit = 25, {
+    startDate = "2025-01-01",
+    category = "watchlist",
+    civilOnly = true,
+    excludeBankruptcy = true
+  } = {}) {
+    const groups = new Map();
+
+    for (const row of this.getRawCaseViews(startDate)) {
+      const key = buildCanonicalCaseGroupKey(row);
+      if (!key) {
+        continue;
+      }
+
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key).push(row);
+    }
+
+    return [...groups.values()]
+      .filter((group) => group.length > 1)
+      .map((group) => {
+        const ordered = [...group].sort(compareCaseRowsForCanonicalChoice);
+        const canonical = mergeDuplicateCaseGroup(ordered);
+        return {
+          canonical,
+          rows: ordered,
+          duplicateCount: ordered.length - 1
+        };
+      })
+      .filter((group) => !category || this.matchesCategory(group.canonical, category))
+      .filter((group) => !civilOnly || isCivilLike(group.canonical))
+      .filter((group) => !excludeBankruptcy || !isBankruptcyLike(group.canonical))
+      .sort((left, right) => {
+        const troDiff =
+          (Number(Boolean(right.canonical.insights?.is_tro_case)) + Number(Boolean(right.canonical.insights?.is_schedule_a_case)) + Number(Boolean(right.canonical.insights?.is_seller_case))) -
+          (Number(Boolean(left.canonical.insights?.is_tro_case)) + Number(Boolean(left.canonical.insights?.is_schedule_a_case)) + Number(Boolean(left.canonical.insights?.is_seller_case)));
+        if (troDiff !== 0) {
+          return troDiff;
+        }
+
+        if (left.duplicateCount !== right.duplicateCount) {
+          return right.duplicateCount - left.duplicateCount;
+        }
+
+        if (Number(left.canonical.docket_count || 0) !== Number(right.canonical.docket_count || 0)) {
+          return Number(right.canonical.docket_count || 0) - Number(left.canonical.docket_count || 0);
+        }
+
+        return compareIsoDesc(
+          left.canonical.latest_docket_filed_at || left.canonical.date_filed || left.canonical.updated_at,
+          right.canonical.latest_docket_filed_at || right.canonical.date_filed || right.canonical.updated_at
+        );
+      })
+      .slice(0, Math.max(1, Number(limit || 25)));
+  }
+
+  async reconcileDuplicateCases({
+    startDate = "2025-01-01",
+    category = "watchlist",
+    limit = 100
+  } = {}) {
+    const groups = this.getDuplicateCaseGroups(limit, {
+      startDate,
+      category,
+      civilOnly: true,
+      excludeBankruptcy: true
+    });
+
+    let groupsProcessed = 0;
+    let casesMerged = 0;
+    let entriesMoved = 0;
+
+    await this.batchMutations(async () => {
+      for (const group of groups) {
+        const ordered = group.rows;
+        const canonicalSeed = ordered[0];
+        const canonical = mergeDuplicateCaseGroup(ordered);
+        const duplicateIds = ordered
+          .slice(1)
+          .map((row) => Number(row.id))
+          .filter((value) => Number.isFinite(value) && value > 0);
+
+        if (!duplicateIds.length) {
+          continue;
+        }
+
+        const savedCase = this.upsertCase({
+          source_case_key: canonicalSeed.source_case_key,
+          primary_source: canonical.primary_source,
+          source_case_id: canonicalSeed.source_case_id,
+          courtlistener_docket_id: canonical.courtlistener_docket_id,
+          pacer_case_id: canonical.pacer_case_id,
+          court_id: canonical.court_id,
+          court_name: canonical.court_name,
+          case_name: canonical.case_name,
+          case_name_zh: canonical.case_name_zh,
+          docket_number: canonical.docket_number,
+          date_filed: canonical.date_filed,
+          date_terminated: canonical.date_terminated,
+          cause: canonical.cause,
+          nature_of_suit: canonical.nature_of_suit,
+          status: canonical.status,
+          tags_marker: buildTagsMarker(canonical.tags || []),
+          docket_url: canonical.docket_url,
+          source_urls: canonical.source_urls,
+          plaintiffs: canonical.plaintiffs,
+          defendants: canonical.defendants,
+          recent_activity_summary: canonical.recent_activity_summary,
+          recent_activity_summary_zh: canonical.recent_activity_summary_zh,
+          latest_docket_filed_at: canonical.latest_docket_filed_at,
+          latest_docket_number: canonical.latest_docket_number,
+          docket_count: Number(canonical.docket_count || 0),
+          last_seen_at: canonical.last_seen_at,
+          last_synced_at: canonical.last_synced_at,
+          last_docket_sync_at: canonical.last_docket_sync_at,
+          last_translation_at: canonical.last_translation_at,
+          raw: {
+            ...(canonical.raw || {}),
+            duplicate_reconcile: {
+              reconciledAt: nowIso(),
+              mergedCaseIds: duplicateIds,
+              mergedSourceCaseKeys: ordered.slice(1).map((row) => row.source_case_key).filter(Boolean)
+            }
+          }
+        });
+
+        const placeholders = duplicateIds.map(() => "?").join(", ");
+        const movedResult = this.db
+          .prepare(`UPDATE docket_entries SET case_id = ? WHERE case_id IN (${placeholders})`)
+          .run(savedCase.id, ...duplicateIds);
+        this.db.prepare(`DELETE FROM cases WHERE id IN (${placeholders})`).run(...duplicateIds);
+
+        groupsProcessed += 1;
+        casesMerged += duplicateIds.length;
+        entriesMoved += Number(movedResult?.changes || 0);
+      }
+    });
+
+    return {
+      groupsProcessed,
+      casesMerged,
+      entriesMoved
+    };
   }
 
   upsertCase(record) {
