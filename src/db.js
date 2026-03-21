@@ -232,6 +232,10 @@ function hasTrackedLawFirmSource(caseLike) {
   return TRACKED_LAW_FIRM_SOURCE_PATTERNS.some((pattern) => sourceUrlsContain(caseLike, pattern));
 }
 
+function hasConcretePriorityFeedLink(caseLike = {}) {
+  return caseHasPriorityFeedUrl(caseLike) || Boolean(getPriorityFeedRaw(caseLike)?.url);
+}
+
 const shanghaiDateFormatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Shanghai",
   year: "numeric",
@@ -2248,7 +2252,7 @@ export class Store {
       `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, docket_count DESC, id ASC`,
       Math.max(limit * 12, 240),
       { startDate: null, requirePriorityTags: false }
-    );
+    ).filter((row) => hasConcretePriorityFeedLink(row) || getPriorityFeedRowCount(row) > 0);
 
     if (preferKnownPriorityFeed) {
       const entryCounts = this.getEntryCoverageForCaseIds(knownPriorityFeedRows.map((row) => row.id));
@@ -2260,7 +2264,7 @@ export class Store {
           };
           const syncedAt = getPriorityFeedSyncedAt(row) ? Date.parse(getPriorityFeedSyncedAt(row)) : 0;
           const priorityFeedRowCount = getPriorityFeedRowCount(row);
-          const hasPriorityFeedUrl = caseHasPriorityFeedUrl(row);
+          const hasPriorityFeedUrl = hasConcretePriorityFeedLink(row);
           const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), priorityFeedRowCount, 6);
           const missingMarked = isPriorityFeedMissing(row);
           const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
@@ -2357,7 +2361,7 @@ export class Store {
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
         const syncedAt = getPriorityFeedSyncedAt(row) ? Date.parse(getPriorityFeedSyncedAt(row)) : 0;
         const priorityFeedRowCount = getPriorityFeedRowCount(row);
-        const hasPriorityFeedUrl = caseHasPriorityFeedUrl(row);
+        const hasPriorityFeedUrl = hasConcretePriorityFeedLink(row);
         const hasPriorityFeedEntries = priorityFeedRowCount > 0 || coverage.priorityFeedEntries > 0;
         const hasKnownPriorityFeedSource = hasPriorityFeedUrl || hasPriorityFeedEntries;
         const hasLawFirmSource = hasTrackedLawFirmSource(row);
