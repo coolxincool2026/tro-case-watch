@@ -468,26 +468,62 @@ function hydrateEntry(row) {
 }
 
 function dedupeEntries(entries) {
-  const deduped = new Map();
+  const orderCollapsed = new Map();
+  const orderlessEntries = [];
 
   for (const entry of entries) {
     const orderKey = normalizedEntryOrderKey(entry);
-    const fallbackKey = normalizeText(
-      [entry.filed_at, String(entry.description || "").replace(/[^\w]+/g, " ").trim().slice(0, 240)].join("|")
-    );
-    const key = orderKey ? `order:${orderKey}` : fallbackKey;
-
-    if (!key) {
+    if (!orderKey) {
+      orderlessEntries.push(entry);
       continue;
     }
 
-    const existing = deduped.get(key);
+    const existing = orderCollapsed.get(orderKey);
     if (!existing || compareEntriesForCanonicalRow(entry, existing) < 0) {
-      deduped.set(key, entry);
+      orderCollapsed.set(orderKey, entry);
     }
   }
 
-  return [...deduped.values()].sort(compareEntriesForTimeline);
+  const candidates = [...orderCollapsed.values(), ...orderlessEntries];
+  const familyCounts = new Map();
+  for (const entry of candidates) {
+    const familyKey = buildEntryFamilyKey(entry);
+    if (!familyKey) {
+      continue;
+    }
+
+    familyCounts.set(familyKey, (familyCounts.get(familyKey) || 0) + 1);
+  }
+
+  const deduped = [];
+  const dateBuckets = new Map();
+
+  for (const entry of candidates.sort(compareEntriesForTimeline)) {
+    const bucketKey = String(entry.filed_at || entry.created_at || "");
+    const bucket = dateBuckets.get(bucketKey) || [];
+    let matchedIndex = -1;
+
+    for (const index of bucket) {
+      if (areSemanticallyDuplicateEntries(entry, deduped[index], familyCounts)) {
+        matchedIndex = index;
+        break;
+      }
+    }
+
+    if (matchedIndex === -1) {
+      const nextIndex = deduped.push(entry) - 1;
+      bucket.push(nextIndex);
+      dateBuckets.set(bucketKey, bucket);
+      continue;
+    }
+
+    const existing = deduped[matchedIndex];
+    if (compareEntriesForCanonicalRow(entry, existing) < 0) {
+      deduped[matchedIndex] = entry;
+    }
+  }
+
+  return deduped.filter(Boolean).sort(compareEntriesForTimeline);
 }
 
 function normalizeOrderText(value) {
@@ -496,11 +532,318 @@ function normalizeOrderText(value) {
     return "";
   }
 
-  return text.replace(/,+/g, "").replace(/\.0+$/, "");
+  const compact = text.replace(/,+/g, "");
+
+  if (/^\d+(?:\.\d+)?$/.test(compact)) {
+    const numeric = Number.parseFloat(compact);
+    if (Number.isFinite(numeric)) {
+      if (Number.isInteger(numeric)) {
+        return String(numeric);
+      }
+
+      return String(numeric).replace(/\.0+$/, "");
+    }
+  }
+
+  if (/^\d+(?:[-/]\d+)+$/.test(compact)) {
+    return compact
+      .split(/[-/]/)
+      .map((segment) => String(Number.parseInt(segment, 10)))
+      .join("-");
+  }
+
+  return compact.replace(/^0+(?=\d)/, "");
+}
+
+const ENTRY_GENERIC_TOKENS = new Set([
+  "above",
+  "accordance",
+  "action",
+  "addressed",
+  "affidavit",
+  "against",
+  "application",
+  "approved",
+  "as",
+  "be",
+  "by",
+  "case",
+  "certificate",
+  "chambers",
+  "civil",
+  "clerk",
+  "compliance",
+  "conference",
+  "counsel",
+  "court",
+  "day",
+  "declaration",
+  "defendant",
+  "defendants",
+  "dismissal",
+  "document",
+  "entry",
+  "federal",
+  "filed",
+  "filing",
+  "form",
+  "for",
+  "further",
+  "granted",
+  "hearing",
+  "held",
+  "hereby",
+  "in",
+  "injunction",
+  "law",
+  "letter",
+  "materials",
+  "memorandum",
+  "minute",
+  "motion",
+  "notice",
+  "of",
+  "on",
+  "order",
+  "other",
+  "plaintiff",
+  "plaintiffs",
+  "prejudice",
+  "preliminary",
+  "procedure",
+  "proceedings",
+  "proposed",
+  "pursuant",
+  "regarding",
+  "re",
+  "related",
+  "reply",
+  "request",
+  "response",
+  "reviewed",
+  "rule",
+  "service",
+  "signed",
+  "so",
+  "staff",
+  "submission",
+  "submitted",
+  "support",
+  "temporary",
+  "text",
+  "that",
+  "the",
+  "to",
+  "transcript",
+  "voluntary",
+  "with",
+  "without"
+]);
+
+function tokenizeEntryDescription(value) {
+  return String(value || "")
+    .replace(/\b([A-Za-z]+)'s\b/g, "$1s")
+    .toLowerCase()
+    .replace(/[\u4e00-\u9fff]+/g, " ")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter((token) => token && token.length > 1);
+}
+
+function normalizeEntryDescription(value) {
+  return tokenizeEntryDescription(value).join(" ");
+}
+
+function extractEntryReferenceNumbers(value) {
+  const references = new Set();
+  const text = String(value || "");
+  for (const match of text.matchAll(/\[(\d+(?:\.\d+)?)\]/g)) {
+    references.add(normalizeOrderText(match[1]));
+  }
+
+  for (const match of text.matchAll(/\b(?:ecf|document)\s+no\.?\s*(\d+(?:\.\d+)?)\b/gi)) {
+    references.add(normalizeOrderText(match[1]));
+  }
+
+  return [...references].filter(Boolean);
+}
+
+function extractDistinctiveEntryTokens(value) {
+  const tokens = tokenizeEntryDescription(value);
+  return [...new Set(tokens.filter((token) => {
+    if (!token) {
+      return false;
+    }
+
+    if (ENTRY_GENERIC_TOKENS.has(token)) {
+      return false;
+    }
+
+    if (/^\d{4}$/.test(token)) {
+      return false;
+    }
+
+    if (/^\d+$/.test(token)) {
+      return token.length >= 2;
+    }
+
+    return token.length >= 4 || /\d/.test(token);
+  }))];
+}
+
+function buildEntryFamilyKey(entry) {
+  const dateKey = String(entry?.filed_at || entry?.created_at || "");
+  const lead = tokenizeEntryDescription(entry?.description).slice(0, 12).join(" ");
+  if (!dateKey || lead.split(" ").length < 6) {
+    return "";
+  }
+
+  return `${dateKey}|${lead}`;
+}
+
+function intersectSets(left = [], right = []) {
+  const rightSet = new Set(right);
+  return left.filter((item) => rightSet.has(item));
+}
+
+function countFuzzySharedTokens(left = [], right = []) {
+  const rightTokens = [...right];
+  const used = new Set();
+  let matches = 0;
+
+  for (const token of left) {
+    if (!token) {
+      continue;
+    }
+
+    const matchIndex = rightTokens.findIndex((candidate, index) => {
+      if (!candidate || used.has(index)) {
+        return false;
+      }
+
+      if (candidate === token) {
+        return true;
+      }
+
+      const short = token.length <= candidate.length ? token : candidate;
+      const long = token.length > candidate.length ? token : candidate;
+      return short.length >= 8 && long.startsWith(short);
+    });
+
+    if (matchIndex !== -1) {
+      used.add(matchIndex);
+      matches += 1;
+    }
+  }
+
+  return matches;
+}
+
+function isStrongDescriptionPrefixMatch(left, right) {
+  const first = normalizeEntryDescription(left);
+  const second = normalizeEntryDescription(right);
+  if (!first || !second) {
+    return false;
+  }
+
+  const short = first.length <= second.length ? first : second;
+  const long = first.length > second.length ? first : second;
+  return short.length >= 60 && long.startsWith(short);
+}
+
+function entrySourcesDiffer(left, right) {
+  return String(left?.primary_source || "") !== String(right?.primary_source || "") ||
+    String(left?.source || "") !== String(right?.source || "");
+}
+
+function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) {
+  if (!left || !right) {
+    return false;
+  }
+
+  const leftDate = String(left.filed_at || left.created_at || "");
+  const rightDate = String(right.filed_at || right.created_at || "");
+  if (!leftDate || leftDate !== rightDate) {
+    return false;
+  }
+
+  const leftOrder = normalizedEntryOrderKey(left);
+  const rightOrder = normalizedEntryOrderKey(right);
+  if (leftOrder && rightOrder && leftOrder === rightOrder) {
+    return true;
+  }
+
+  const leftDescription = normalizeEntryDescription(left.description);
+  const rightDescription = normalizeEntryDescription(right.description);
+  if (!leftDescription || !rightDescription) {
+    return false;
+  }
+
+  const crossSource = entrySourcesDiffer(left, right);
+  const semanticEligible = crossSource && (
+    String(left?.primary_source || "") === "worldtro" ||
+    String(right?.primary_source || "") === "worldtro"
+  );
+  if (!semanticEligible) {
+    return false;
+  }
+
+  if (leftDescription === rightDescription) {
+    return true;
+  }
+
+  const leftRefs = extractEntryReferenceNumbers(left.description);
+  const rightRefs = extractEntryReferenceNumbers(right.description);
+  const sharedRefs = intersectSets(leftRefs, rightRefs);
+  const leftTokens = extractDistinctiveEntryTokens(left.description);
+  const rightTokens = extractDistinctiveEntryTokens(right.description);
+  const sharedTokens = intersectSets(leftTokens, rightTokens);
+  const fuzzySharedTokenCount = Math.max(
+    countFuzzySharedTokens(leftTokens, rightTokens),
+    countFuzzySharedTokens(rightTokens, leftTokens)
+  );
+  const leftFamily = buildEntryFamilyKey(left);
+  const rightFamily = buildEntryFamilyKey(right);
+  const sameFamily = Boolean(leftFamily && leftFamily === rightFamily);
+
+  if (sharedRefs.length && sharedTokens.length >= 2) {
+    return true;
+  }
+
+  if (sameFamily &&
+      isStrongDescriptionPrefixMatch(left.description, right.description) &&
+      sharedTokens.length >= 2) {
+    return true;
+  }
+
+  if (isStrongDescriptionPrefixMatch(left.description, right.description) &&
+      fuzzySharedTokenCount >= 2) {
+    return true;
+  }
+
+  if (sameFamily &&
+      familyCounts.get(leftFamily) === 2 &&
+      semanticEligible) {
+    return true;
+  }
+
+  return false;
 }
 
 function normalizedEntryOrderKey(entry) {
-  return normalizeOrderText(entry.document_number) || normalizeOrderText(entry.entry_number) || "";
+  const normalized = normalizeOrderText(entry.document_number) || normalizeOrderText(entry.entry_number) || "";
+  if (!normalized) {
+    return "";
+  }
+
+  if (String(entry?.primary_source || "") === "worldtro") {
+    return `worldtro:${normalized}`;
+  }
+
+  return normalized;
 }
 
 function parseEntryOrderValue(entry) {
@@ -564,14 +907,14 @@ function entryContentRank(entry) {
 }
 
 function compareEntriesForCanonicalRow(left, right) {
-  const contentCompare = entryContentRank(right) - entryContentRank(left);
-  if (contentCompare !== 0) {
-    return contentCompare;
-  }
-
   const descriptionCompare = String(right.description || "").length - String(left.description || "").length;
   if (descriptionCompare !== 0) {
     return descriptionCompare;
+  }
+
+  const contentCompare = entryContentRank(right) - entryContentRank(left);
+  if (contentCompare !== 0) {
+    return contentCompare;
   }
 
   const sourceCompare = entrySourceRank(right) - entrySourceRank(left);
