@@ -965,9 +965,23 @@ function getWorldtroRowCount(caseLike = {}) {
 }
 
 function getWorldtroEntries(entries = []) {
-  return entries
+  const deduped = new Map();
+
+  for (const entry of entries
     .filter((entry) => String(entry?.primary_source || "") === "worldtro")
-    .sort(compareEntriesForTimeline);
+    .sort(compareEntriesForTimeline)) {
+    const signature = [
+      normalizeOrderText(entry?.document_number) || normalizeOrderText(entry?.entry_number) || "",
+      String(entry?.filed_at || ""),
+      normalizeEntryDescription(entry?.description)
+    ].join("|");
+
+    if (!deduped.has(signature)) {
+      deduped.set(signature, entry);
+    }
+  }
+
+  return [...deduped.values()].sort(compareEntriesForTimeline);
 }
 
 function hasWorldtroAuthority(caseLike, entries = []) {
