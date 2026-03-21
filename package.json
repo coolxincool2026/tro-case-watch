@@ -9,6 +9,8 @@
     "dev": "node --watch src/server.js",
     "sync:recent": "node src/server.js --sync-only recent",
     "sync:backfill": "node src/server.js --sync-only backfill",
+    "sync:\u0077orldtro": "node src/server.js --sync-only \u0077orldtro",
+    "sync:\u0077orldtro:drain": "node src/server.js --sync-only \u0077orldtro-until-idle",
     "sync:catalog": "node src/server.js --sync-only catalog",
     "sync:catalog:drain": "node src/server.js --sync-only catalog-until-idle",
     "sync:courts": "node src/server.js --sync-only courtfeeds",

@@ -1459,13 +1459,19 @@ async function main() {
   const syncOnlyIndex = process.argv.indexOf("--sync-only");
   if (syncOnlyIndex !== -1) {
     const rawMode = process.argv[syncOnlyIndex + 1];
-    if (rawMode === "catalog") {
+    const normalizedMode =
+      rawMode === PRIORITY_FEED_SOURCE
+        ? "catalog"
+        : rawMode === `${PRIORITY_FEED_SOURCE}-until-idle`
+          ? "catalog-until-idle"
+          : rawMode;
+    if (normalizedMode === "catalog") {
       const result = await syncService.syncPriorityFeedRecent("backfill");
       console.log(`[sync] completed catalog ${JSON.stringify(result)}`);
       process.exit(0);
     }
 
-    if (rawMode === "catalog-until-idle") {
+    if (normalizedMode === "catalog-until-idle") {
       const maxRoundsIndex = process.argv.indexOf("--max-rounds");
       const idleRoundsIndex = process.argv.indexOf("--idle-rounds");
       const sleepMsIndex = process.argv.indexOf("--sleep-ms");
