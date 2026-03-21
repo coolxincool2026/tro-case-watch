@@ -233,6 +233,10 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload));
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function buildApiHeaders(origin = "") {
   const headers = {
     "content-type": "application/json; charset=utf-8",
@@ -1300,6 +1304,69 @@ async function main() {
     if (rawMode === "worldtro") {
       const result = await syncService.syncWorldtroRecent("backfill");
       console.log(`[sync] completed worldtro ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "worldtro-until-idle") {
+      const maxRoundsIndex = process.argv.indexOf("--max-rounds");
+      const idleRoundsIndex = process.argv.indexOf("--idle-rounds");
+      const sleepMsIndex = process.argv.indexOf("--sleep-ms");
+      const maxRounds = maxRoundsIndex !== -1
+        ? Math.max(Number(process.argv[maxRoundsIndex + 1] || 0), 1)
+        : 200;
+      const idleRounds = idleRoundsIndex !== -1
+        ? Math.max(Number(process.argv[idleRoundsIndex + 1] || 0), 1)
+        : 3;
+      const sleepMs = sleepMsIndex !== -1
+        ? Math.max(Number(process.argv[sleepMsIndex + 1] || 0), 0)
+        : 3000;
+
+      let rounds = 0;
+      let idleStreak = 0;
+      let totalSyncedCases = 0;
+      let totalFailedCases = 0;
+      let totalDiscoveredCases = 0;
+      let totalAttachedCases = 0;
+      let totalCreatedCases = 0;
+
+      while (rounds < maxRounds && idleStreak < idleRounds) {
+        rounds += 1;
+        const result = await syncService.syncWorldtroRecent("backfill");
+        totalSyncedCases += Number(result.syncedCases || 0);
+        totalFailedCases += Number(result.failedCases || 0);
+        totalDiscoveredCases += Number(result.discoveredCases || 0);
+        totalAttachedCases += Number(result.attachedCases || 0);
+        totalCreatedCases += Number(result.createdCases || 0);
+
+        const idleRound = Number(result.syncedCases || 0) === 0 && Number(result.discoveredCases || 0) === 0;
+        idleStreak = idleRound ? idleStreak + 1 : 0;
+
+        console.log(`[sync] worldtro round ${rounds} ${JSON.stringify({
+          ...result,
+          idleRound,
+          idleStreak
+        })}`);
+
+        if (idleStreak >= idleRounds || rounds >= maxRounds) {
+          break;
+        }
+
+        if (sleepMs > 0) {
+          await wait(sleepMs);
+        }
+      }
+
+      console.log(`[sync] completed worldtro-until-idle ${JSON.stringify({
+        rounds,
+        idleStreak,
+        maxRounds,
+        idleRounds,
+        totalSyncedCases,
+        totalFailedCases,
+        totalDiscoveredCases,
+        totalAttachedCases,
+        totalCreatedCases
+      })}`);
       process.exit(0);
     }
 

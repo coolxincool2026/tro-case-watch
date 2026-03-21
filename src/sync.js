@@ -1477,6 +1477,12 @@ export class CaseSyncService {
 
       return {
         syncedCases,
+        failedCases,
+        discoveredCases: Number(discoveryResult.discoveredCases || 0),
+        attachedCases: Number(discoveryResult.attachedCases || 0),
+        createdCases: Number(discoveryResult.createdCases || 0),
+        totalCatalogCases: Number(discoveryResult.totalCatalogCases || 0),
+        discoverySkipped: Boolean(discoveryResult.skipped),
         note: syncedCases
           ? `WorldTRO 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，并补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
           : failedCases
