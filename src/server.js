@@ -1552,9 +1552,8 @@ async function main() {
       let idleStreak = 0;
       let totalSyncedCases = 0;
       let totalFailedCases = 0;
-      let totalDiscoveredCases = 0;
-      let totalAttachedCases = 0;
-      let totalCreatedCases = 0;
+      let totalNotFoundCases = 0;
+      let discoverySnapshot = null;
 
       while (rounds < maxRounds && idleStreak < idleRounds) {
         rounds += 1;
@@ -1570,9 +1569,14 @@ async function main() {
         );
         totalSyncedCases += Number(result.syncedCases || 0);
         totalFailedCases += Number(result.failedCases || 0);
-        totalDiscoveredCases += Number(result.discoveredCases || 0);
-        totalAttachedCases += Number(result.attachedCases || 0);
-        totalCreatedCases += Number(result.createdCases || 0);
+        totalNotFoundCases += Number(result.notFoundCases || 0);
+        discoverySnapshot = {
+          discoveredCases: Number(result.discoveredCases || 0),
+          attachedCases: Number(result.attachedCases || 0),
+          createdCases: Number(result.createdCases || 0),
+          totalCatalogCases: Number(result.totalCatalogCases || 0),
+          discoverySkipped: Boolean(result.discoverySkipped)
+        };
 
         const idleRound = Number(result.candidateCount || 0) === 0 && Number(result.discoveredCases || 0) === 0;
         idleStreak = idleRound ? idleStreak + 1 : 0;
@@ -1600,9 +1604,8 @@ async function main() {
         batchSize,
         totalSyncedCases,
         totalFailedCases,
-        totalDiscoveredCases,
-        totalAttachedCases,
-        totalCreatedCases
+        totalNotFoundCases,
+        discoverySnapshot
       })}`);
       process.exit(0);
     }
