@@ -676,6 +676,24 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload));
 }
 
+function buildWeakEtag(stat) {
+  return `W/"${Number(stat.size || 0).toString(16)}-${Math.floor(Number(stat.mtimeMs || 0)).toString(16)}"`;
+}
+
+function isImmutableStaticAsset(target = "", extension = "") {
+  return extension === ".js" || extension === ".css";
+}
+
+function isCacheableStaticAsset(target = "", extension = "") {
+  return isImmutableStaticAsset(target, extension) ||
+    extension === ".jpg" ||
+    extension === ".jpeg" ||
+    extension === ".png" ||
+    extension === ".svg" ||
+    extension === ".webp" ||
+    extension === ".ico";
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -3033,9 +3051,7 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 404, { error: "Case not found" });
     }
 
-    const hydrationPlan = shouldHydratePublicCaseDetailOnDemand(item)
-      ? queueCaseHydration(caseId, item)
-      : buildCaseHydrationPlan(item);
+    const hydrationPlan = buildCaseHydrationPlan(item);
     const payload = serializePublicCaseDetail({
       ...item,
       hydration_pending: hydrationPlan
@@ -3376,11 +3392,15 @@ function serveStatic(request, response, pathname) {
   }
 
   const extension = path.extname(filePath);
+  const stat = fs.statSync(filePath);
+  const etag = buildWeakEtag(stat);
   const headers = {
     "content-type": mimeTypes[extension] || "application/octet-stream",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
-    "referrer-policy": "same-origin"
+    "referrer-policy": "same-origin",
+    etag,
+    "last-modified": stat.mtime.toUTCString()
   };
 
   if (target === "/ops.html") {
@@ -3392,10 +3412,23 @@ function serveStatic(request, response, pathname) {
     headers["content-security-policy"] =
       "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' mailto:";
     headers["cache-control"] = "no-store";
+  } else if (isImmutableStaticAsset(target, extension)) {
+    headers["cache-control"] = "public, max-age=31536000, immutable";
+  } else if (isCacheableStaticAsset(target, extension)) {
+    headers["cache-control"] = "public, max-age=2592000";
+  } else {
+    headers["cache-control"] = "public, max-age=3600";
   }
   if (extension === ".html") {
     attachBrowserGuardCookie(request, headers);
   }
+
+  if (extension !== ".html" && String(request.headers["if-none-match"] || "").trim() === etag) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+
   response.writeHead(200, headers);
   response.end(extension === ".html" ? injectPublicApiTokenIntoHtml(request, fs.readFileSync(filePath)) : fs.readFileSync(filePath));
 }

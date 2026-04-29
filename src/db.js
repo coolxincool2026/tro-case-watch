@@ -2270,6 +2270,9 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_cases_schedule_a_activity ON cases(is_schedule_a, priority_activity_at DESC, updated_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS idx_cases_seller_watch_activity ON cases(is_seller_watch, priority_activity_at DESC, updated_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS idx_cases_court_activity ON cases(court_id, priority_activity_at DESC, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_cases_dashboard_rollup ON cases(date_filed, created_at, is_watchlist, is_tro, is_schedule_a, is_seller_watch);
+      CREATE INDEX IF NOT EXISTS idx_cases_watchlist_court_facets ON cases(is_watchlist, date_filed, court_id, court_name);
+      CREATE INDEX IF NOT EXISTS idx_cases_updated_at_latest ON cases(updated_at DESC, docket_number, case_name);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS cases_search_fts
       USING fts5(search_text, content='cases', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
@@ -2291,6 +2294,57 @@ export class Store {
         VALUES (new.id, COALESCE(new.search_text, ''));
       END;
     `);
+
+    try {
+      this.ensurePublicReadFastPath();
+    } catch (error) {
+      console.warn(
+        `[public-read-fast-path] initialization skipped: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  ensurePublicReadFastPath() {
+    const missingCases = Number(
+      this.db
+        .prepare(`SELECT COUNT(*) AS total FROM cases WHERE ${CASE_FAST_PATH_MISSING_WHERE_SQL}`)
+        .get()?.total || 0
+    );
+
+    if (!missingCases) {
+      const fts = this.rebuildCaseSearchFtsIfNeeded();
+      if (fts.rebuilt) {
+        this.invalidateCaseViews();
+      }
+      return {
+        missingCases: 0,
+        updatedCases: 0,
+        rebuiltFts: Boolean(fts.rebuilt)
+      };
+    }
+
+    try {
+      this.backfillCaseFastPathColumns();
+      const fts = this.rebuildCaseSearchFtsIfNeeded();
+      this.invalidateCaseViews();
+      console.log(
+        `[public-read-fast-path] backfilled ${missingCases} case rows${fts.rebuilt ? " and rebuilt FTS" : ""}`
+      );
+      return {
+        missingCases,
+        updatedCases: missingCases,
+        rebuiltFts: Boolean(fts.rebuilt),
+        mode: "bulk"
+      };
+    } catch (error) {
+      console.warn(
+        `[public-read-fast-path] bulk backfill failed, retrying in batches: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return this.rebuildCaseFastPathColumns({
+        batchSize: 500,
+        limit: 0
+      });
+    }
   }
 
   backfillCaseFastPathColumns() {
@@ -2329,6 +2383,7 @@ export class Store {
     let updated = 0;
     let skipped = 0;
     const skippedCaseIds = [];
+    let skippedOverflowLogged = false;
     let processed = 0;
     let cursor = Number.MAX_SAFE_INTEGER;
     const safeUpdateStatement = this.db.prepare(`
@@ -2392,10 +2447,13 @@ export class Store {
             skipped += 1;
             if (skippedCaseIds.length < 25) {
               skippedCaseIds.push(caseId);
+              console.warn(
+                `[rebuild-case-fast-path] skipping case ${caseId}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+              );
+            } else if (!skippedOverflowLogged) {
+              skippedOverflowLogged = true;
+              console.warn("[rebuild-case-fast-path] additional malformed cases omitted from logs");
             }
-            console.warn(
-              `[rebuild-case-fast-path] skipping case ${caseId}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
-            );
           }
         }
       }
@@ -3008,7 +3066,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE COALESCE(date_filed, '') >= ?
+        WHERE date_filed >= ?
         ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
       `)
       .all(cacheKey)
@@ -3029,7 +3087,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE COALESCE(date_filed, '') >= ?
+        WHERE date_filed >= ?
         ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
       `)
       .all(String(startDate || "2025-01-01"))
@@ -4126,7 +4184,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE COALESCE(date_filed, '') >= ?
+        WHERE date_filed >= ?
           AND (${clauses.join(" OR ")})
         ORDER BY docket_number DESC, COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
         LIMIT 250
@@ -4146,7 +4204,7 @@ export class Store {
       return [];
     }
 
-    const whereClauses = [`COALESCE(date_filed, '') >= ?`];
+    const whereClauses = [`date_filed >= ?`];
     const params = [startDate];
     const categoryClause = this.buildCategoryWhereClause(category);
     if (categoryClause !== "1 = 1") {
@@ -4199,7 +4257,7 @@ export class Store {
     }
 
     try {
-      const whereClauses = [`COALESCE(c.date_filed, '') >= ?`];
+      const whereClauses = [`c.date_filed >= ?`];
       const params = [matchQuery, startDate];
       const categoryClause = this.buildCategoryWhereClause(category, "c.");
       if (categoryClause !== "1 = 1") {
@@ -4239,21 +4297,20 @@ export class Store {
 
   buildCategoryWhereClause(category, columnPrefix = "") {
     const column = (name) => `${columnPrefix}${name}`;
-    const legacyFallback = (clause) => `(COALESCE(${column("search_text")}, '') = '' AND ${clause})`;
     if (category === "watchlist") {
-      return `(${column("is_watchlist")} = 1 OR ${legacyFallback(`(${column("tags_marker")} LIKE '%|tro|%' OR ${column("tags_marker")} LIKE '%|schedule_a|%' OR ${column("tags_marker")} LIKE '%|seller_tro|%')`)})`;
+      return `${column("is_watchlist")} = 1`;
     }
 
     if (category === "tro") {
-      return `(${column("is_tro")} = 1 OR ${legacyFallback(`${column("tags_marker")} LIKE '%|tro|%'`)})`;
+      return `${column("is_tro")} = 1`;
     }
 
     if (category === "schedule_a") {
-      return `(${column("is_schedule_a")} = 1 OR ${legacyFallback(`${column("tags_marker")} LIKE '%|schedule_a|%'`)})`;
+      return `${column("is_schedule_a")} = 1`;
     }
 
     if (category === "seller_watch") {
-      return `(${column("is_seller_watch")} = 1 OR ${legacyFallback(`${column("tags_marker")} LIKE '%|seller_tro|%'`)})`;
+      return `${column("is_seller_watch")} = 1`;
     }
 
     return "1 = 1";
@@ -4261,7 +4318,7 @@ export class Store {
 
   listCasesBySql({ startDate, pageSize, page, category, selectedCourt }) {
     const categoryClause = this.buildCategoryWhereClause(category);
-    const baseWhere = [`COALESCE(date_filed, '') >= ?`, `(${categoryClause})`];
+    const baseWhere = [`date_filed >= ?`, `(${categoryClause})`];
     const baseParams = [startDate];
 
     if (selectedCourt) {
@@ -4296,7 +4353,7 @@ export class Store {
       .prepare(`
         SELECT court_id, court_name, COUNT(*) AS total
         FROM cases
-        WHERE COALESCE(date_filed, '') >= ?
+        WHERE date_filed >= ?
           AND (${categoryClause})
         GROUP BY court_id, court_name
         ORDER BY total DESC, court_name ASC
@@ -6360,38 +6417,20 @@ export class Store {
       .prepare(`
         SELECT
           COUNT(*) AS total_cases,
-          SUM(
-            CASE
-              WHEN COALESCE(is_watchlist, 0) = 1
-                OR (COALESCE(search_text, '') = '' AND (
-                  tags_marker LIKE '%|tro|%'
-                  OR tags_marker LIKE '%|schedule_a|%'
-                  OR tags_marker LIKE '%|seller_tro|%'
-                ))
-              THEN 1
-              ELSE 0
-            END
-          ) AS watchlist_cases,
-          SUM(CASE WHEN COALESCE(is_tro, 0) = 1 OR (COALESCE(search_text, '') = '' AND tags_marker LIKE '%|tro|%') THEN 1 ELSE 0 END) AS tro_cases,
-          SUM(CASE WHEN COALESCE(is_schedule_a, 0) = 1 OR (COALESCE(search_text, '') = '' AND tags_marker LIKE '%|schedule_a|%') THEN 1 ELSE 0 END) AS schedule_a_cases,
-          SUM(CASE WHEN COALESCE(is_seller_watch, 0) = 1 OR (COALESCE(search_text, '') = '' AND tags_marker LIKE '%|seller_tro|%') THEN 1 ELSE 0 END) AS seller_cases,
+          SUM(CASE WHEN is_watchlist = 1 THEN 1 ELSE 0 END) AS watchlist_cases,
+          SUM(CASE WHEN is_tro = 1 THEN 1 ELSE 0 END) AS tro_cases,
+          SUM(CASE WHEN is_schedule_a = 1 THEN 1 ELSE 0 END) AS schedule_a_cases,
+          SUM(CASE WHEN is_seller_watch = 1 THEN 1 ELSE 0 END) AS seller_cases,
           SUM(
             CASE
               WHEN created_at >= ? AND created_at < ?
-               AND (
-                 COALESCE(is_watchlist, 0) = 1
-                 OR (COALESCE(search_text, '') = '' AND (
-                   tags_marker LIKE '%|tro|%'
-                   OR tags_marker LIKE '%|schedule_a|%'
-                   OR tags_marker LIKE '%|seller_tro|%'
-                 ))
-               )
+               AND is_watchlist = 1
               THEN 1
               ELSE 0
             END
           ) AS today_added_watchlist
         FROM cases
-        WHERE COALESCE(date_filed, '') >= ?
+        WHERE date_filed >= ?
       `)
       .get(todayBounds.startIso, todayBounds.endIso, "2025-01-01");
     const totals = {

@@ -327,7 +327,7 @@ function looksLikeDirectDocketSearch(value = "") {
 }
 
 function shouldAutoOpenFirstResult() {
-  return !state.search || looksLikeDirectDocketSearch(state.search);
+  return looksLikeDirectDocketSearch(state.search);
 }
 
 function clearLookupPendingRetry() {
@@ -1181,7 +1181,7 @@ async function loadCases({ autoSelectFirst = false, preserveSelection = true, si
 
   renderCases(payload);
   if (payload.items?.length) {
-    prefetchVisibleCaseDetails(payload.items, state.search ? 0 : 1);
+    prefetchVisibleCaseDetails(payload.items, shouldAutoOpenFirstResult() ? 1 : 0);
   }
   if (payload.lookupPending && state.search) {
     scheduleLookupPendingRetry(state.search);
@@ -1355,11 +1355,15 @@ async function boot() {
     });
   }
 
-  loadStatus().catch(console.error);
   await loadCases({
     autoSelectFirst: !routeCaseId,
     preserveSelection: Boolean(routeCaseId)
   });
+  window.setTimeout(() => {
+    queueIdle(() => {
+      loadStatus().catch(console.error);
+    });
+  }, 300);
   window.setTimeout(() => {
     queueIdle(() => {
       loadTroDailyUpdates().catch(() => {});
