@@ -147,6 +147,28 @@ const supportedWebhookEnrichmentProviders = new Set([
   "docketalarm",
   "unicourt"
 ]);
+const standaloneSyncTaskLockMinutes = new Map([
+  ["catalog", 30],
+  ["courtfeeds", 20],
+  ["recentfilings", 20],
+  ["lawfirms", 30],
+  ["pacermonitor", 30],
+  ["pacer", 30],
+  ["docketalarm", 30],
+  ["unicourt", 30],
+  ["courtlistener-docket", 30],
+  ["courtlistener-alerts", 30],
+  ["recompute-case-summaries", 60],
+  ["reconcile-duplicates", 30],
+  ["dedupe-docket-entries", 45],
+  ["rebuild-case-fast-path", 45],
+  ["cleanup-window-email", 15],
+  ["restore-missing-from-backup", 120],
+  ["inspect-missing-from-backup", 30],
+  ["daily-report", 20],
+  ["tro-daily-roundup", 20],
+  ["tro-daily-updates", 15]
+]);
 
 function clearPublicResponseCache(pathPrefixes = []) {
   if (!Array.isArray(pathPrefixes) || !pathPrefixes.length) {
@@ -175,17 +197,67 @@ function isSqliteBusyError(error) {
   );
 }
 
+function normalizeSyncOnlyMode(rawMode = "") {
+  if (rawMode === PRIORITY_FEED_SOURCE) {
+    return "catalog";
+  }
+  if (rawMode === `${PRIORITY_FEED_SOURCE}-until-idle`) {
+    return "catalog-until-idle";
+  }
+  return String(rawMode || "").trim();
+}
+
+function getDetachedSyncOnlyMode(args = []) {
+  const syncOnlyIndex = args.indexOf("--sync-only");
+  if (syncOnlyIndex === -1) {
+    return null;
+  }
+
+  return normalizeSyncOnlyMode(args[syncOnlyIndex + 1]);
+}
+
+function getStandaloneSyncLockMinutes(mode) {
+  return standaloneSyncTaskLockMinutes.get(mode) || 30;
+}
+
+function canPreclaimDetachedTask(mode) {
+  return standaloneSyncTaskLockMinutes.has(mode);
+}
+
 function spawnDetachedTask(args = [], extraEnv = {}) {
+  const mode = getDetachedSyncOnlyMode(args);
+  const env = {
+    ...process.env,
+    ...extraEnv
+  };
+
+  if (mode && canPreclaimDetachedTask(mode) && !env.DETACHED_TASK_RUN_ID) {
+    const runId = store.claimSyncRun("system", mode, getStandaloneSyncLockMinutes(mode));
+    if (!runId) {
+      console.warn(`[spawn-guard] skipped task=${mode} reason=already-running`);
+      return {
+        spawned: false,
+        mode,
+        reason: "already-running"
+      };
+    }
+
+    env.DETACHED_TASK_RUN_ID = String(runId);
+    env.DETACHED_TASK_MODE = mode;
+  }
+
   const child = spawn(process.execPath, [currentScriptPath, ...args], {
     cwd: path.dirname(config.publicDir),
-    env: {
-      ...process.env,
-      ...extraEnv
-    },
+    env,
     detached: true,
     stdio: "ignore"
   });
   child.unref();
+  return {
+    spawned: true,
+    pid: child.pid,
+    mode
+  };
 }
 
 function getSyncModeMaxRuntimeMs(mode = "recent") {
@@ -304,8 +376,31 @@ function buildWebhookEnrichmentWorkerEnv() {
   };
 }
 
+function getWebhookEnrichmentWorkStats() {
+  try {
+    return getWebhookEnrichmentQueueStats(store.getCheckpoint(webhookEnrichmentQueueCheckpointKey), {
+      now: new Date().toISOString()
+    });
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      console.warn(`[webhook-enrichment] skipped queue probe: ${error.message}`);
+      return null;
+    }
+    throw error;
+  }
+}
+
 function scheduleWebhookEnrichmentWorker({ force = false } = {}) {
   if (!config.sync?.webhookEnrichmentEnabled) {
+    return false;
+  }
+
+  const queueStats = getWebhookEnrichmentWorkStats();
+  if (
+    queueStats &&
+    Number(queueStats.readyCount || 0) <= 0 &&
+    Number(queueStats.expiredLeaseCount || 0) <= 0
+  ) {
     return false;
   }
 
@@ -315,8 +410,8 @@ function scheduleWebhookEnrichmentWorker({ force = false } = {}) {
   }
 
   lastWebhookEnrichmentWorkerQueuedAt = Date.now();
-  spawnDetachedTask(["--sync-only", "webhook-enrichment"], buildWebhookEnrichmentWorkerEnv());
-  return true;
+  const spawned = spawnDetachedTask(["--sync-only", "webhook-enrichment"], buildWebhookEnrichmentWorkerEnv());
+  return Boolean(spawned.spawned);
 }
 
 function getWebhookEnrichmentPriorityAt(caseRow, { lastWebhookFiledAt = null, lastWebhookAt = null } = {}) {
@@ -512,6 +607,85 @@ function runSyncModeChild(mode, extraArgs = [], extraEnv = {}, { streamLogs = fa
       }
     });
   });
+}
+
+async function withStandaloneSyncTaskLock(mode, task) {
+  const normalizedMode = normalizeSyncOnlyMode(mode);
+  const preclaimedRunId = Number(process.env.DETACHED_TASK_RUN_ID || 0);
+  const preclaimedMode = String(process.env.DETACHED_TASK_MODE || "").trim();
+  const maxAgeMinutes = getStandaloneSyncLockMinutes(normalizedMode);
+  const runId =
+    preclaimedRunId > 0 && preclaimedMode === normalizedMode
+      ? preclaimedRunId
+      : store.claimSyncRun("system", normalizedMode, maxAgeMinutes);
+
+  if (!runId) {
+    return {
+      skipped: true,
+      reason: "already-running",
+      mode: normalizedMode
+    };
+  }
+
+  const heartbeatIntervalMs = Math.max(Number(config.sync?.runHeartbeatIntervalMs || 30 * 1000), 5 * 1000);
+  const maxRuntimeMs = Math.max(maxAgeMinutes * 60 * 1000, 60 * 1000);
+  const touchHeartbeat = () => {
+    store.touchSyncRun(runId, {
+      provider: "system",
+      mode: normalizedMode,
+      pid: process.pid
+    });
+  };
+  touchHeartbeat();
+
+  const heartbeatTimer = setInterval(() => {
+    try {
+      touchHeartbeat();
+    } catch (error) {
+      console.warn(`[sync-lock] heartbeat failed task=${normalizedMode}: ${error.message}`);
+    }
+  }, heartbeatIntervalMs);
+  heartbeatTimer.unref?.();
+
+  const timeoutTimer = setTimeout(() => {
+    const message = `${normalizedMode} task exceeded ${Math.round(maxRuntimeMs / 60000)} minutes`;
+    try {
+      store.finishSyncRun(runId, "failed", { mode: normalizedMode }, message);
+      store.clearSyncRunHeartbeat(runId);
+    } catch {}
+    console.error(`[sync-lock] ${message}`);
+    process.exit(124);
+  }, maxRuntimeMs);
+  timeoutTimer.unref?.();
+
+  try {
+    const result = await task();
+    store.finishSyncRun(runId, "succeeded", result && typeof result === "object" ? result : { result });
+    return result;
+  } catch (error) {
+    store.finishSyncRun(runId, "failed", { mode: normalizedMode }, error?.message || String(error));
+    throw error;
+  } finally {
+    clearInterval(heartbeatTimer);
+    clearTimeout(timeoutTimer);
+    try {
+      store.clearSyncRunHeartbeat(runId);
+    } catch {}
+  }
+}
+
+function printSyncOnlyResult(label, result, { resultJson = false } = {}) {
+  if (resultJson) {
+    console.log(JSON.stringify(result));
+    return;
+  }
+
+  if (result?.skipped) {
+    console.log(`[sync] skipped ${label} ${JSON.stringify({ reason: result.reason || "already-running" })}`);
+    return;
+  }
+
+  console.log(`[sync] completed ${label} ${JSON.stringify(result)}`);
 }
 
 function ensureSeedDatabase() {
@@ -3566,12 +3740,10 @@ async function main() {
           : rawMode;
     if (normalizedMode === "catalog") {
       const forceDiscovery = process.argv.includes("--force-discovery");
-      const result = await syncService.syncPriorityFeedRecent("backfill", { forceDiscovery });
-      if (resultJson) {
-        console.log(JSON.stringify(result));
-      } else {
-        console.log(`[sync] completed catalog ${JSON.stringify(result)}`);
-      }
+      const result = await withStandaloneSyncTaskLock("catalog", () =>
+        syncService.syncPriorityFeedRecent("backfill", { forceDiscovery })
+      );
+      printSyncOnlyResult("catalog", result, { resultJson });
       process.exit(0);
     }
 
@@ -3659,50 +3831,50 @@ async function main() {
     }
 
     if (rawMode === "courtfeeds") {
-      const result = await syncService.syncCourtFeedsRecent("recent");
-      console.log(`[sync] completed courtfeeds ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("courtfeeds", () => syncService.syncCourtFeedsRecent("recent"));
+      printSyncOnlyResult("courtfeeds", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "recentfilings") {
-      const result = await syncService.syncRecentFilingsRecent("recent");
-      console.log(`[sync] completed recentfilings ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("recentfilings", () => syncService.syncRecentFilingsRecent("recent"));
+      printSyncOnlyResult("recentfilings", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "lawfirms") {
-      const result = await syncService.syncLawFirmRecent("recent");
-      console.log(`[sync] completed lawfirms ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("lawfirms", () => syncService.syncLawFirmRecent("recent"));
+      printSyncOnlyResult("lawfirms", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "pacermonitor") {
-      const result = await syncService.syncPacerMonitorRecent("backfill");
-      console.log(`[sync] completed pacermonitor ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("pacermonitor", () => syncService.syncPacerMonitorRecent("backfill"));
+      printSyncOnlyResult("pacermonitor", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "pacer") {
-      const result = await syncService.syncPacerRecent("backfill");
-      console.log(`[sync] completed pacer ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("pacer", () => syncService.syncPacerRecent("backfill"));
+      printSyncOnlyResult("pacer", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "docketalarm") {
-      const result = await syncService.syncDocketAlarmRecent("backfill");
-      console.log(`[sync] completed docketalarm ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("docketalarm", () => syncService.syncDocketAlarmRecent("backfill"));
+      printSyncOnlyResult("docketalarm", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "unicourt") {
-      const result = await syncService.syncUniCourtRecent("backfill");
-      console.log(`[sync] completed unicourt ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("unicourt", () => syncService.syncUniCourtRecent("backfill"));
+      printSyncOnlyResult("unicourt", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "courtlistener-docket") {
-      const result = await syncService.syncCourtListenerDockets();
-      console.log(`[sync] completed courtlistener-docket ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("courtlistener-docket", () => syncService.syncCourtListenerDockets());
+      printSyncOnlyResult("courtlistener-docket", result, { resultJson });
       process.exit(0);
     }
 
@@ -3710,12 +3882,12 @@ async function main() {
       const limitIndex = process.argv.indexOf("--limit");
       const startDateIndex = process.argv.indexOf("--start-date");
       const force = process.argv.includes("--force");
-      const result = await syncService.syncCourtListenerAlertSubscriptions({
+      const result = await withStandaloneSyncTaskLock("courtlistener-alerts", () => syncService.syncCourtListenerAlertSubscriptions({
         limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 1) : null,
         startDate: startDateIndex !== -1 ? String(process.argv[startDateIndex + 1] || "").trim() : null,
         force
-      });
-      console.log(`[sync] completed courtlistener-alerts ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("courtlistener-alerts", result, { resultJson });
       process.exit(0);
     }
 
@@ -3723,24 +3895,24 @@ async function main() {
       const batchSizeIndex = process.argv.indexOf("--batch-size");
       const limitIndex = process.argv.indexOf("--limit");
       const touchUpdatedAt = process.argv.includes("--touch-updated-at");
-      const result = await store.recomputeAllCaseDocketSummaries({
+      const result = await withStandaloneSyncTaskLock("recompute-case-summaries", () => store.recomputeAllCaseDocketSummaries({
         batchSize: batchSizeIndex !== -1 ? Number(process.argv[batchSizeIndex + 1] || 500) : 500,
         limit: limitIndex !== -1 ? Number(process.argv[limitIndex + 1] || 0) : 0,
         touchUpdatedAt
-      });
-      console.log(`[sync] completed recompute-case-summaries ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("recompute-case-summaries", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "reconcile-duplicates") {
       const limitIndex = process.argv.indexOf("--limit");
       const limit = limitIndex !== -1 ? Math.min(Math.max(Number(process.argv[limitIndex + 1] || 100), 1), 500) : 100;
-      const result = await store.reconcileDuplicateCases({
+      const result = await withStandaloneSyncTaskLock("reconcile-duplicates", () => store.reconcileDuplicateCases({
         startDate: config.sync.startDate,
         category: "watchlist",
         limit
-      });
-      console.log(`[sync] completed reconcile-duplicates ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("reconcile-duplicates", result, { resultJson });
       process.exit(0);
     }
 
@@ -3749,57 +3921,57 @@ async function main() {
       const caseIdIndex = process.argv.indexOf("--case-id");
       const sourceIndex = process.argv.indexOf("--source");
       const startDateIndex = process.argv.indexOf("--start-date");
-      const result = await store.dedupeStoredDocketEntries({
+      const result = await withStandaloneSyncTaskLock("dedupe-docket-entries", () => store.dedupeStoredDocketEntries({
         limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0,
         caseId: caseIdIndex !== -1 ? Math.max(Number(process.argv[caseIdIndex + 1] || 0), 0) : 0,
         primarySource: sourceIndex !== -1 ? String(process.argv[sourceIndex + 1] || "").trim() || null : null,
         startDate: startDateIndex !== -1 ? String(process.argv[startDateIndex + 1] || "").trim() || config.sync.startDate : config.sync.startDate
-      });
-      console.log(`[sync] completed dedupe-docket-entries ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("dedupe-docket-entries", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "rebuild-case-fast-path") {
       const batchSizeIndex = process.argv.indexOf("--batch-size");
       const limitIndex = process.argv.indexOf("--limit");
-      const result = store.rebuildCaseFastPathColumns({
+      const result = await withStandaloneSyncTaskLock("rebuild-case-fast-path", () => store.rebuildCaseFastPathColumns({
         batchSize: batchSizeIndex !== -1 ? Math.max(Number(process.argv[batchSizeIndex + 1] || 1000), 1) : 1000,
         limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0
-      });
-      console.log(`[sync] completed rebuild-case-fast-path ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("rebuild-case-fast-path", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "cleanup-window-email") {
-      const result = store.cleanupWindowEmailArtifacts({
+      const result = await withStandaloneSyncTaskLock("cleanup-window-email", () => store.cleanupWindowEmailArtifacts({
         vacuum: process.argv.includes("--vacuum")
-      });
-      console.log(`[sync] completed cleanup-window-email ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("cleanup-window-email", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "restore-missing-from-backup") {
       const sourceDbIndex = process.argv.indexOf("--source-db");
       const limitIndex = process.argv.indexOf("--limit");
-      const result = await store.restoreMissingFromBackup({
+      const result = await withStandaloneSyncTaskLock("restore-missing-from-backup", () => store.restoreMissingFromBackup({
         sourceDbPath: sourceDbIndex !== -1 ? String(process.argv[sourceDbIndex + 1] || "").trim() : "",
         dryRun: process.argv.includes("--dry-run"),
         limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0,
         retainedOnly: process.argv.includes("--retained-only")
-      });
-      console.log(`[sync] completed restore-missing-from-backup ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("restore-missing-from-backup", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "inspect-missing-from-backup") {
       const sourceDbIndex = process.argv.indexOf("--source-db");
       const limitIndex = process.argv.indexOf("--limit");
-      const result = store.inspectMissingFromBackup({
+      const result = await withStandaloneSyncTaskLock("inspect-missing-from-backup", () => store.inspectMissingFromBackup({
         sourceDbPath: sourceDbIndex !== -1 ? String(process.argv[sourceDbIndex + 1] || "").trim() : "",
         limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0,
         retainedOnly: process.argv.includes("--retained-only")
-      });
-      console.log(`[sync] completed inspect-missing-from-backup ${JSON.stringify(result)}`);
+      }));
+      printSyncOnlyResult("inspect-missing-from-backup", result, { resultJson });
       process.exit(0);
     }
 
@@ -3822,20 +3994,20 @@ async function main() {
     }
 
     if (rawMode === "daily-report") {
-      const result = await dailyEmailReport.maybeSendScheduledReport();
-      console.log(`[sync] completed daily-report ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("daily-report", () => dailyEmailReport.maybeSendScheduledReport());
+      printSyncOnlyResult("daily-report", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "tro-daily-roundup") {
-      const result = await troDailyRoundup.maybeSendScheduledRoundup();
-      console.log(`[sync] completed tro-daily-roundup ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("tro-daily-roundup", () => troDailyRoundup.maybeSendScheduledRoundup());
+      printSyncOnlyResult("tro-daily-roundup", result, { resultJson });
       process.exit(0);
     }
 
     if (rawMode === "tro-daily-updates") {
-      const result = await troDailyRoundup.refreshUpdates({});
-      console.log(`[sync] completed tro-daily-updates ${JSON.stringify(result)}`);
+      const result = await withStandaloneSyncTaskLock("tro-daily-updates", () => troDailyRoundup.refreshUpdates({}));
+      printSyncOnlyResult("tro-daily-updates", result, { resultJson });
       process.exit(0);
     }
 

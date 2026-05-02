@@ -101,3 +101,30 @@ test("webhook enrichment queue can requeue a leased job after memory pressure", 
   assert.equal(stats.readyCount, 0);
   assert.deepEqual(finished.state.pending[0]?.providers, ["61tro", "recentfilings"]);
 });
+
+test("webhook enrichment queue stats expose expired leases as runnable work", () => {
+  let state = null;
+
+  ({ state } = enqueueWebhookEnrichmentJobState(state, {
+    caseId: 444,
+    providers: ["worldtro"],
+    enqueuedAt: "2026-04-19T10:00:00.000Z",
+    runAfter: "2026-04-19T10:00:00.000Z",
+    priorityAt: "2026-04-19T10:00:00.000Z",
+    lastWebhookAt: "2026-04-19T10:00:00.000Z"
+  }));
+
+  const claimed = claimWebhookEnrichmentJobState(state, {
+    now: "2026-04-19T10:00:01.000Z",
+    leaseTtlMs: 60_000
+  });
+  const activeStats = getWebhookEnrichmentQueueStats(claimed.state, {
+    now: "2026-04-19T10:00:30.000Z"
+  });
+  const expiredStats = getWebhookEnrichmentQueueStats(claimed.state, {
+    now: "2026-04-19T10:01:02.000Z"
+  });
+
+  assert.equal(activeStats.expiredLeaseCount, 0);
+  assert.equal(expiredStats.expiredLeaseCount, 1);
+});

@@ -304,11 +304,13 @@ export function getWebhookEnrichmentQueueStats(rawState, { now = nowIso() } = {}
   const nowMs = toTimestamp(now);
   const pending = [...state.pending].sort(compareJobs);
   const readyCount = pending.filter((item) => toTimestamp(item.runAfter) <= nowMs).length;
+  const expiredLeaseCount = state.leased.filter((item) => toTimestamp(item.leaseExpiresAt) <= nowMs).length;
 
   return {
     pendingCount: pending.length,
     readyCount,
     leasedCount: state.leased.length,
+    expiredLeaseCount,
     nextRunAt: pending[0]?.runAfter || null
   };
 }
