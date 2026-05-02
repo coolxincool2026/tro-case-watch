@@ -396,8 +396,11 @@ function scheduleWebhookEnrichmentWorker({ force = false } = {}) {
   }
 
   const queueStats = getWebhookEnrichmentWorkStats();
+  if (!queueStats) {
+    return false;
+  }
+
   if (
-    queueStats &&
     Number(queueStats.readyCount || 0) <= 0 &&
     Number(queueStats.expiredLeaseCount || 0) <= 0
   ) {
