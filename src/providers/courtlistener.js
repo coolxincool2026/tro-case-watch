@@ -11,6 +11,7 @@ export class CourtListenerClient {
     this.pacerUsername = pacerConfig.loginId || "";
     this.pacerPassword = pacerConfig.password || "";
     this.pacerClientCode = pacerConfig.clientCode || "";
+    this.rateLimitedUntil = 0;
     this.capabilities = {
       docket: Boolean(this.apiToken) && this.enableDocketSync,
       docketEntries: Boolean(this.apiToken) && this.enableDocketSync,
@@ -225,6 +226,13 @@ export class CourtListenerClient {
   }
 
   async fetchJsonWithRetry(url, options, attempt) {
+    if (Date.now() < this.rateLimitedUntil) {
+      const error = new Error("CourtListener rate limit cooldown active");
+      error.status = 429;
+      error.retryAfterMs = this.rateLimitedUntil - Date.now();
+      throw error;
+    }
+
     const { requiresAuth, method = "GET", body = undefined, contentType = "" } = options || {};
     const headers = {
       accept: "application/json",
@@ -254,6 +262,9 @@ export class CourtListenerClient {
         error.body = text;
         error.requiresAuth = requiresAuth;
         error.retryAfterMs = retryDelayMs(response.headers.get("retry-after"), attempt);
+        if (response.status === 429) {
+          this.rateLimitedUntil = Date.now() + Math.max(error.retryAfterMs, 15 * 60_000);
+        }
         throw error;
       }
 

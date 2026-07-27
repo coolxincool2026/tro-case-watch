@@ -45,6 +45,14 @@ const apiBase = "";
 let lookupThawTimer = null;
 const publicApiToken =
   document.querySelector('meta[name="tt-public-api-token"]')?.getAttribute("content")?.trim() || "";
+const bootstrapPayload = (() => {
+  try {
+    const raw = document.querySelector("#tt-bootstrap")?.textContent?.trim();
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+})();
 
 function detailCacheKey(caseId, { full = false } = {}) {
   return `${Number(caseId)}:${full ? "full" : "light"}`;
@@ -1355,15 +1363,40 @@ async function boot() {
     });
   }
 
-  await loadCases({
-    autoSelectFirst: !routeCaseId,
-    preserveSelection: Boolean(routeCaseId)
-  });
-  window.setTimeout(() => {
-    queueIdle(() => {
-      loadStatus().catch(console.error);
+  if (bootstrapPayload?.status) {
+    renderHero(bootstrapPayload.status);
+  }
+
+  if (bootstrapPayload?.cases) {
+    renderCases(bootstrapPayload.cases);
+  } else {
+    await loadCases({
+      autoSelectFirst: !routeCaseId,
+      preserveSelection: Boolean(routeCaseId)
     });
-  }, 300);
+  }
+
+  if (!bootstrapPayload?.status) {
+    window.setTimeout(() => {
+      queueIdle(() => {
+        loadStatus().catch(console.error);
+      });
+    }, 300);
+  }
+
+  if (bootstrapPayload?.cases) {
+    window.setTimeout(() => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      queueIdle(() => {
+        loadCases({
+          preserveSelection: true,
+          silent: true
+        }).catch(() => {});
+      });
+    }, 45_000);
+  }
   window.setTimeout(() => {
     queueIdle(() => {
       loadTroDailyUpdates().catch(() => {});

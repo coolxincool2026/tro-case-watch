@@ -1249,6 +1249,50 @@ function injectPublicApiTokenIntoHtml(request, htmlBuffer) {
   return `${metaTag}${html}`;
 }
 
+function escapeBootstrapJson(value) {
+  return JSON.stringify(value)
+    .replaceAll("<", "\\u003c")
+    .replaceAll(">", "\\u003e")
+    .replaceAll("&", "\\u0026")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
+}
+
+function injectPublicBootstrapIntoHtml(htmlBuffer) {
+  const html = Buffer.isBuffer(htmlBuffer) ? htmlBuffer.toString("utf-8") : String(htmlBuffer || "");
+
+  try {
+    const payload = {
+      cases: serializePublicCasesPayload(store.listCases({
+        startDate: config.sync.startDate,
+        category: "watchlist",
+        court: "",
+        search: "",
+        page: 1,
+        pageSize: 15
+      })),
+      status: serializePublicStatus(syncService.getPublicStatus()),
+      generatedAt: new Date().toISOString()
+    };
+    const bootstrapTag =
+      `<script id="tt-bootstrap" type="application/json">${escapeBootstrapJson(payload)}</script>\n`;
+
+    if (html.includes("</head>")) {
+      return html.replace("</head>", `${bootstrapTag}</head>`);
+    }
+
+    return `${bootstrapTag}${html}`;
+  } catch (error) {
+    console.error("[bootstrap] failed to build public payload:", error);
+    return html;
+  }
+}
+
+function renderPublicHtml(request, htmlBuffer, { includeBootstrap = false } = {}) {
+  const tokenizedHtml = injectPublicApiTokenIntoHtml(request, htmlBuffer);
+  return includeBootstrap ? injectPublicBootstrapIntoHtml(tokenizedHtml) : tokenizedHtml;
+}
+
 function isSuspiciousUserAgent(request) {
   const userAgent = String(request.headers["user-agent"] || "").toLowerCase();
   if (!userAgent) {
@@ -3564,7 +3608,7 @@ function serveStatic(request, response, pathname) {
       "x-content-type-options": "nosniff",
       "cache-control": "no-store"
     }));
-    response.end(injectPublicApiTokenIntoHtml(request, fs.readFileSync(fallback)));
+    response.end(renderPublicHtml(request, fs.readFileSync(fallback), { includeBootstrap: true }));
     return;
   }
 
@@ -3607,7 +3651,11 @@ function serveStatic(request, response, pathname) {
   }
 
   response.writeHead(200, headers);
-  response.end(extension === ".html" ? injectPublicApiTokenIntoHtml(request, fs.readFileSync(filePath)) : fs.readFileSync(filePath));
+  response.end(
+    extension === ".html"
+      ? renderPublicHtml(request, fs.readFileSync(filePath), { includeBootstrap: target === "/index.html" })
+      : fs.readFileSync(filePath)
+  );
 }
 
 const server = http.createServer(async (request, response) => {

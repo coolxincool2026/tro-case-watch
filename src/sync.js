@@ -1086,6 +1086,7 @@ export class CaseSyncService {
       }
 
       let successfulPresets = 0;
+      let courtListenerRateLimited = false;
       for (const preset of discoveryPresets) {
         try {
           const result = await this.syncPreset(preset, mode);
@@ -1095,10 +1096,15 @@ export class CaseSyncService {
           successfulPresets += 1;
         } catch (error) {
           stats.notes.push(`CourtListener 搜索预设 ${preset.label} 失败：${error.message}`);
+          if (error.status === 429) {
+            courtListenerRateLimited = true;
+            stats.notes.push("CourtListener 已触发限流，本轮停止其余搜索和 docket 请求，等待自动冷却。");
+            break;
+          }
         }
       }
 
-      if (!successfulPresets && !discoverySourceAvailable) {
+      if (!successfulPresets && !discoverySourceAvailable && !courtListenerRateLimited) {
         throw new Error("CourtListener 搜索预设全部失败");
       }
 
@@ -1121,14 +1127,16 @@ export class CaseSyncService {
         stats.notes.push(`优先目录 补源跳过：${error.message}`);
       }
 
-      try {
-        const docketResult = await this.syncCourtListenerDockets(mode);
-        stats.docketCasesSynced += docketResult.syncedCases;
-        if (docketResult.note) {
-          stats.notes.push(docketResult.note);
+      if (!courtListenerRateLimited) {
+        try {
+          const docketResult = await this.syncCourtListenerDockets(mode);
+          stats.docketCasesSynced += docketResult.syncedCases;
+          if (docketResult.note) {
+            stats.notes.push(docketResult.note);
+          }
+        } catch (error) {
+          stats.notes.push(`CourtListener docket 补抓跳过：${error.message}`);
         }
-      } catch (error) {
-        stats.notes.push(`CourtListener docket 补抓跳过：${error.message}`);
       }
 
       try {

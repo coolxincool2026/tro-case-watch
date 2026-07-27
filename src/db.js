@@ -85,6 +85,9 @@ function sqliteStringLiteral(value) {
 
 const DASHBOARD_STATS_CACHE_TTL_MS = 3 * 60_000;
 const RECENT_SYNC_CACHE_TTL_MS = 15_000;
+const CASE_VIEW_CACHE_TTL_MS = 30_000;
+const LIST_PAYLOAD_CACHE_TTL_MS = 15_000;
+const CASE_DETAIL_CACHE_TTL_MS = 30_000;
 
 function syncRunHeartbeatKey(id) {
   return `sync-run-heartbeat:${Number(id || 0)}`;
@@ -3058,7 +3061,7 @@ export class Store {
   getHydratedCases(startDate = "2025-01-01") {
     const cacheKey = String(startDate || "2025-01-01");
     const cached = this.caseViewCache.get(cacheKey);
-    if (cached && cached.version === this.caseCacheVersion) {
+    if (cached && cached.version === this.caseCacheVersion && cached.expiresAt > Date.now()) {
       return cached.rows;
     }
 
@@ -3076,6 +3079,7 @@ export class Store {
 
     this.caseViewCache.set(cacheKey, {
       version: this.caseCacheVersion,
+      expiresAt: Date.now() + CASE_VIEW_CACHE_TTL_MS,
       rows: collapsedRows
     });
 
@@ -4393,7 +4397,7 @@ export class Store {
     });
 
     const cached = this.listPayloadCache.get(cacheKey);
-    if (cached && cached.version === this.caseCacheVersion) {
+    if (cached && cached.version === this.caseCacheVersion && cached.expiresAt > Date.now()) {
       return cloneListPayload(cached.value);
     }
 
@@ -4408,6 +4412,7 @@ export class Store {
 
       this.listPayloadCache.set(cacheKey, {
         version: this.caseCacheVersion,
+        expiresAt: Date.now() + LIST_PAYLOAD_CACHE_TTL_MS,
         value: payload
       });
 
@@ -4474,6 +4479,7 @@ export class Store {
 
     this.listPayloadCache.set(cacheKey, {
       version: this.caseCacheVersion,
+      expiresAt: Date.now() + LIST_PAYLOAD_CACHE_TTL_MS,
       value: payload
     });
 
@@ -4484,7 +4490,7 @@ export class Store {
     const normalizedLimit = Math.max(0, Number(recentEntriesLimit || 0));
     const cacheKey = `${Number(id)}:${normalizedLimit || "full"}`;
     const cached = this.caseDetailCache.get(cacheKey);
-    if (cached && cached.version === this.caseCacheVersion) {
+    if (cached && cached.version === this.caseCacheVersion && cached.expiresAt > Date.now()) {
       return cached.value;
     }
 
@@ -4553,6 +4559,7 @@ export class Store {
 
     this.caseDetailCache.set(cacheKey, {
       version: this.caseCacheVersion,
+      expiresAt: Date.now() + CASE_DETAIL_CACHE_TTL_MS,
       value: detail
     });
 
