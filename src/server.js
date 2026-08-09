@@ -14,6 +14,7 @@ import { CourtFeedClient } from "./providers/courtfeed.js";
 import { RecentFilingsClient } from "./providers/recentfilings.js";
 import { LawFirmClient } from "./providers/lawfirm.js";
 import { CatalogClient } from "./providers/catalog.js";
+import { SignalFeedClient, SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
 import { PacerAdapter } from "./providers/pacer.js";
 import { PacerMonitorAdapter } from "./providers/pacermonitor.js";
 import { DocketAlarmClient } from "./providers/docketalarm.js";
@@ -62,6 +63,7 @@ const courtListener = new CourtListenerClient(config.courtListener, config.pacer
 const courtFeeds = new CourtFeedClient(config.courtFeeds);
 const recentFilings = new RecentFilingsClient(config.recentFilings);
 const lawFirms = new LawFirmClient(config.lawFirms);
+const signalFeed = new SignalFeedClient(config.signalFeed);
 const priorityFeed = new CatalogClient(config.priorityFeed);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
 const docketAlarm = new DocketAlarmClient(config.docketAlarm);
@@ -77,6 +79,7 @@ const syncService = new CaseSyncService({
   recentFilings,
   lawFirms,
   courtListener,
+  signalFeed,
   priorityFeed,
   pacerMonitor,
   docketAlarm,
@@ -139,6 +142,7 @@ const publicSiteOrigins = new Set([
 const courtListenerWebhookPrefix = "/api/webhook/courtlistener/";
 const webhookEnrichmentQueueCheckpointKey = "system:webhook-enrichment-queue";
 const supportedWebhookEnrichmentProviders = new Set([
+  SIGNAL_FEED_PROVIDER_KEY,
   PRIORITY_FEED_SOURCE,
   "61tro",
   "recentfilings",
@@ -148,6 +152,7 @@ const supportedWebhookEnrichmentProviders = new Set([
   "unicourt"
 ]);
 const standaloneSyncTaskLockMinutes = new Map([
+  [SIGNAL_FEED_PROVIDER_KEY, 15],
   ["catalog", 30],
   ["courtfeeds", 20],
   ["recentfilings", 20],
@@ -2470,7 +2475,7 @@ function queueCaseHydration(caseId, initialItem) {
 
 async function refreshCaseAcrossSources(caseId, {
   initialItem = null,
-  providers = ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"],
+  providers = [SIGNAL_FEED_PROVIDER_KEY, "lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"],
   interProviderDelayMs = 0,
   shouldContinue = null
 } = {}) {
@@ -2565,6 +2570,10 @@ async function refreshCaseAcrossSources(caseId, {
     }
     return true;
   };
+
+  if (!stoppedReason && expandedProviders.includes(SIGNAL_FEED_PROVIDER_KEY)) {
+    await runProvider(SIGNAL_FEED_PROVIDER_KEY, () => syncService.enrichCaseWithSignalFeed(caseId, { force: true }));
+  }
 
   const lookupProviders = expandedProviders.filter((provider) => provider.startsWith("lookup:"));
   if (lookupProviders.length && current) {
@@ -3701,7 +3710,7 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
+      : [SIGNAL_FEED_PROVIDER_KEY, "lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
 
     const lookupResult = await syncService.importLookup(docketNumber, { courtName, caseName });
     const startDate = config.sync.discoveryStartDate || config.sync.startDate || "2025-01-01";
@@ -3751,7 +3760,7 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
+      : [SIGNAL_FEED_PROVIDER_KEY, "lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
 
     const result = await refreshCaseAcrossSources(caseId, {
       initialItem: store.getCase(caseId),
@@ -3890,6 +3899,12 @@ async function main() {
     if (rawMode === "recentfilings") {
       const result = await withStandaloneSyncTaskLock("recentfilings", () => syncService.syncRecentFilingsRecent("recent"));
       printSyncOnlyResult("recentfilings", result, { resultJson });
+      process.exit(0);
+    }
+
+    if (rawMode === SIGNAL_FEED_PROVIDER_KEY) {
+      const result = await withStandaloneSyncTaskLock(SIGNAL_FEED_PROVIDER_KEY, () => syncService.syncSignalFeedRecent("recent"));
+      printSyncOnlyResult(SIGNAL_FEED_PROVIDER_KEY, result, { resultJson });
       process.exit(0);
     }
 

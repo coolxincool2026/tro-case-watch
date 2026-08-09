@@ -10,6 +10,7 @@ import {
   sourceUrlUsesPriorityFeed,
   isPriorityFeedPrimarySource
 } from "./priority-feed.js";
+import { SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
 
 function valueOf(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? null;
@@ -827,7 +828,7 @@ function hasCourtFeedNegativeSignals(item, existingCase = null) {
 }
 
 export class CaseSyncService {
-  constructor({ config, store, courtFeeds, recentFilings, lawFirms, courtListener, priorityFeed, pacerMonitor, docketAlarm, uniCourt, pacer, translator }) {
+  constructor({ config, store, courtFeeds, recentFilings, lawFirms, courtListener, signalFeed, priorityFeed, pacerMonitor, docketAlarm, uniCourt, pacer, translator }) {
     this.config = config;
     this.store = store;
     this.courtFeeds = courtFeeds;
@@ -846,6 +847,18 @@ export class CaseSyncService {
     };
     this.lawFirms = lawFirms;
     this.courtListener = courtListener;
+    this.signalFeed = signalFeed || {
+      enabled: false,
+      getStatus() {
+        return { enabled: false, state: "disabled" };
+      },
+      async fetchRecent() {
+        return { items: [], source: "disabled" };
+      },
+      async lookupByDocket() {
+        return null;
+      }
+    };
     this.priorityFeed = priorityFeed;
     this.pacerMonitor = pacerMonitor;
     this.docketAlarm = docketAlarm;
@@ -969,6 +982,8 @@ export class CaseSyncService {
       courtFeedLookups: 0,
       recentFilingsCasesUpserted: 0,
       recentFilingsLookups: 0,
+      signalFeedCasesUpserted: 0,
+      signalFeedEntriesUpserted: 0,
       pacerCasesUpserted: 0,
       pacerPagesFetched: 0,
       lawFirmCasesUpserted: 0,
@@ -1044,6 +1059,18 @@ export class CaseSyncService {
         }
       } catch (error) {
         stats.notes.push(`官方法院 RSS 补源跳过：${error.message}`);
+      }
+
+      try {
+        const signalFeedResult = await this.syncSignalFeedRecent(mode);
+        stats.signalFeedCasesUpserted += signalFeedResult.casesUpserted || 0;
+        stats.signalFeedEntriesUpserted += signalFeedResult.docketEntriesUpserted || 0;
+        discoverySourceAvailable = discoverySourceAvailable || (signalFeedResult.itemsFetched || 0) > 0;
+        if (signalFeedResult.note) {
+          stats.notes.push(signalFeedResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`优先信号源补抓跳过：${error.message}`);
       }
 
       try {
@@ -1502,6 +1529,211 @@ export class CaseSyncService {
     }
 
     return index;
+  }
+
+  classifySignalFeedItem(item) {
+    const tags = classifyCase(
+      {
+        caseName: item.caseName,
+        case_name_full: item.caseName,
+        court: item.courtName,
+        party: [],
+        recap_documents: (item.entries || []).map((entry) => ({
+          short_description: "Docket Entry",
+          description: entry.title
+        }))
+      },
+      []
+    );
+
+    return [...new Set([
+      ...tags,
+      "tro",
+      normalizeText(item.caseName || "").includes("schedule a") ? "schedule_a" : null
+    ].filter(Boolean))];
+  }
+
+  ingestSignalFeedItems(items = []) {
+    const caseIndex = this.buildCourtFeedCaseIndex();
+    const timestamp = new Date().toISOString();
+    let casesUpserted = 0;
+    let docketEntriesUpserted = 0;
+
+    for (const item of items) {
+      const docketNumber = String(item.docketNumber || "").trim();
+      if (!docketLooksLike(docketNumber)) {
+        continue;
+      }
+
+      const primaryKey = buildCourtDocketKey(item.courtId, docketNumber);
+      const fallbackKey = buildCourtDocketKey(item.courtName, docketNumber);
+      const existingCase =
+        caseIndex.get(primaryKey) ||
+        caseIndex.get(fallbackKey) ||
+        this.store.findCaseByCourtAndDocket({
+          courtId: item.courtId,
+          courtName: item.courtName,
+          docketNumber,
+          startDate: getDiscoveryStartDate(this.config)
+        });
+      const entries = Array.isArray(item.entries) ? item.entries : [];
+      const latestEntry = entries.reduce((latest, entry) => {
+        if (!latest) {
+          return entry;
+        }
+        return String(entry.filedAt || "").localeCompare(String(latest.filedAt || "")) > 0 ? entry : latest;
+      }, null);
+      const tags = this.classifySignalFeedItem(item);
+      const derivedParties = deriveParties({
+        caseName: item.caseName || `${item.plaintiff || "Unknown Plaintiff"} v. Schedule A Defendants`,
+        party: []
+      });
+      const plaintiffs = uniqueByNormalized([
+        ...(Array.isArray(item.plaintiffs) ? item.plaintiffs : []),
+        item.plaintiff,
+        ...derivedParties.plaintiffs
+      ]);
+      const defendants = uniqueByNormalized([
+        ...(Array.isArray(item.defendants) ? item.defendants : []),
+        item.defendant,
+        ...derivedParties.defendants
+      ]);
+      const mergedRaw = {
+        ...(existingCase?.raw || {}),
+        signal_feed: {
+          ...(existingCase?.raw?.signal_feed || {}),
+          docketId: item.docketId || null,
+          detailUrl: item.detailUrl || null,
+          officialCaseUrl: item.caseUrl || null,
+          judge: item.judge || null,
+          counsel: item.counsel || null,
+          counselFirm: item.counselFirm || null,
+          entryCount: entries.length,
+          syncedAt: timestamp
+        }
+      };
+
+      const savedCase = this.store.upsertCase({
+        source_case_key: existingCase?.source_case_key || `${SIGNAL_FEED_PROVIDER_KEY}:${item.docketId || normalizeDocket(docketNumber)}`,
+        primary_source: existingCase?.primary_source || SIGNAL_FEED_PROVIDER_KEY,
+        source_case_id: existingCase?.source_case_id || item.docketId || docketNumber,
+        courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
+        pacer_case_id: existingCase?.pacer_case_id ?? null,
+        court_id: item.courtId || existingCase?.court_id || null,
+        court_name: item.courtName || existingCase?.court_name || null,
+        case_name: item.caseName || existingCase?.case_name || `${item.plaintiff || "Unknown Plaintiff"} v. Schedule A Defendants`,
+        docket_number: docketNumber || existingCase?.docket_number || null,
+        date_filed: item.dateFiled || existingCase?.date_filed || null,
+        date_terminated: existingCase?.date_terminated || null,
+        cause: existingCase?.cause || null,
+        nature_of_suit: existingCase?.nature_of_suit || null,
+        status: item.status || existingCase?.status || "open",
+        tags_marker: buildTagsMarker([...(existingCase?.tags || []), ...tags]),
+        docket_url: item.caseUrl || existingCase?.docket_url || null,
+        source_urls: [...(existingCase?.source_urls || []), item.caseUrl].filter(Boolean),
+        plaintiffs: plaintiffs.length ? plaintiffs : existingCase?.plaintiffs || [],
+        defendants: defendants.length ? defendants : existingCase?.defendants || [],
+        recent_activity_summary: latestEntry?.title || existingCase?.recent_activity_summary || null,
+        latest_docket_filed_at: laterIso(existingCase?.latest_docket_filed_at, latestEntry?.filedAt || item.dateFiled) || null,
+        latest_docket_number: higherOrderValue(existingCase?.latest_docket_number, latestEntry?.documentNumber) || null,
+        docket_count: Math.max(Number(existingCase?.docket_count || 0), entries.length),
+        last_seen_at: latestEntry?.filedAt || item.dateFiled || timestamp,
+        last_synced_at: timestamp,
+        last_docket_sync_at: entries.length ? timestamp : existingCase?.last_docket_sync_at || null,
+        raw: mergedRaw
+      });
+
+      if (!savedCase) {
+        continue;
+      }
+      casesUpserted += 1;
+
+      for (const entry of entries) {
+        const documentNumber = entry.documentNumber ?? null;
+        const sourceEntryId = entry.entryId || `${item.docketId || normalizeDocket(docketNumber)}:${documentNumber || entry.filedAt || crypto.randomUUID()}`;
+        const savedEntry = this.store.upsertDocketEntry({
+          case_id: savedCase.id,
+          source_entry_key: `${SIGNAL_FEED_PROVIDER_KEY}:${sourceEntryId}`,
+          primary_source: SIGNAL_FEED_PROVIDER_KEY,
+          source_entry_id: sourceEntryId,
+          document_type: "Docket Entry",
+          entry_number: documentNumber,
+          document_number: documentNumber,
+          filed_at: entry.filedAt || item.dateFiled || null,
+          description: entry.title || "Docket entry",
+          absolute_url: entry.documentUrl || null,
+          is_available: entry.documentUrl && !entry.restricted ? 1 : 0,
+          page_count: null,
+          pacer_doc_id: null,
+          raw: {
+            signal_feed: {
+              ...entry,
+              docketId: item.docketId || null
+            }
+          },
+          last_synced_at: timestamp
+        });
+        if (savedEntry) {
+          docketEntriesUpserted += 1;
+        }
+      }
+
+      for (const key of [primaryKey, fallbackKey].filter(Boolean)) {
+        caseIndex.set(key, savedCase);
+      }
+    }
+
+    return { casesUpserted, docketEntriesUpserted };
+  }
+
+  async syncSignalFeedRecent(mode = "recent") {
+    if (!this.signalFeed.enabled || mode !== "recent") {
+      return {
+        itemsFetched: 0,
+        casesUpserted: 0,
+        docketEntriesUpserted: 0,
+        note: this.signalFeed.enabled ? null : "优先信号源已关闭。"
+      };
+    }
+
+    return this.store.batchMutations(async () => {
+      const result = await this.signalFeed.fetchRecent({ hydrate: true });
+      const ingest = this.ingestSignalFeedItems(result.items || []);
+      return {
+        itemsFetched: Number(result.items?.length || 0),
+        casesUpserted: ingest.casesUpserted,
+        docketEntriesUpserted: ingest.docketEntriesUpserted,
+        note: `优先信号源本轮检查 ${Number(result.items?.length || 0)} 个最新案件，写入 ${ingest.casesUpserted} 个案件、${ingest.docketEntriesUpserted} 条 docket。`
+      };
+    });
+  }
+
+  async enrichCaseWithSignalFeed(caseId, { force = false } = {}) {
+    return this.store.batchMutations(async () => {
+      const caseRow = this.store.getCase(caseId);
+      if (!caseRow || !this.signalFeed.enabled || !docketLooksLike(caseRow.docket_number)) {
+        return { enriched: false, reason: "not-applicable" };
+      }
+
+      const syncedAt = caseRow.raw?.signal_feed?.syncedAt
+        ? Date.parse(caseRow.raw.signal_feed.syncedAt)
+        : 0;
+      if (!force && syncedAt && Date.now() - syncedAt < 2 * 60 * 60 * 1000) {
+        return { enriched: false, reason: "fresh" };
+      }
+
+      const item = await this.signalFeed.lookupByDocket(caseRow.docket_number);
+      if (!item) {
+        return { enriched: false, reason: "not-found" };
+      }
+
+      const ingest = this.ingestSignalFeedItems([item]);
+      return {
+        enriched: ingest.casesUpserted > 0 || ingest.docketEntriesUpserted > 0,
+        casesUpserted: ingest.casesUpserted,
+        docketEntriesUpserted: ingest.docketEntriesUpserted
+      };
+    });
   }
 
   classifyRecentFilingsItem(item) {

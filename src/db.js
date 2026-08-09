@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { deriveCaseInsights, docketLooksLike, normalizeDocket, normalizeText } from "./insights.js";
 import { buildTagsMarker } from "./queries.js";
+import { SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
 import {
   PRIORITY_FEED_ENTRY_SOURCE,
   PRIORITY_FEED_HOST,
@@ -754,6 +755,8 @@ function caseSourceRank(caseLike = {}) {
     case "sriplaw":
     case "gbc":
       return 6;
+    case SIGNAL_FEED_PROVIDER_KEY:
+      return 5;
     case PRIORITY_FEED_ENTRY_SOURCE:
       return 5;
     case "courtfeed":
@@ -1730,6 +1733,10 @@ function parseEntryOrderValue(entry) {
 }
 
 function entrySourceRank(entry) {
+  if (entry.primary_source === SIGNAL_FEED_PROVIDER_KEY) {
+    return 4;
+  }
+
   if (entry.primary_source === "pacermonitor") {
     return 3;
   }
@@ -1764,6 +1771,10 @@ function entryAuthorityRank(source = "") {
   }
 
   if (normalized === "courtfeed") {
+    return 7;
+  }
+
+  if (normalized === SIGNAL_FEED_PROVIDER_KEY) {
     return 6;
   }
 

@@ -234,7 +234,7 @@ export const config = {
     workerCatalogSleepMs: envInt("WORKER_CATALOG_SLEEP_MS", 2000),
     workerCatalogBatchSize: envInt("WORKER_CATALOG_BATCH_SIZE", 4),
     webhookEnrichmentEnabled: envBool("WEBHOOK_ENRICHMENT_ENABLED", true),
-    webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["worldtro", "61tro", "recentfilings"]),
+    webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["signal-feed", "worldtro", "61tro", "recentfilings"]),
     webhookEnrichmentSettleDelayMs: envInt("WEBHOOK_ENRICHMENT_SETTLE_DELAY_MS", 90 * 1000),
     webhookEnrichmentLeaseTtlMs: envInt("WEBHOOK_ENRICHMENT_LEASE_TTL_MS", 15 * 60 * 1000),
     webhookEnrichmentProviderDelayMs: envInt("WEBHOOK_ENRICHMENT_PROVIDER_DELAY_MS", 2000),
@@ -264,6 +264,17 @@ export const config = {
     docketAlertSyncIntervalMs: envInt("COURTLISTENER_DOCKET_ALERT_SYNC_INTERVAL_MS", 6 * 60 * 60 * 1000),
     autoReupAlerts: envBool("COURTLISTENER_AUTO_REUP_ALERTS", true),
     webhookSecret: env("COURTLISTENER_WEBHOOK_SECRET", "")
+  },
+  signalFeed: {
+    enabled: envBool("SIGNAL_FEED_ENABLED", false),
+    publicCasesUrl: env("SIGNAL_FEED_PUBLIC_CASES_URL", ""),
+    apiBaseUrl: env("SIGNAL_FEED_API_BASE_URL", ""),
+    apiKey: env("SIGNAL_FEED_API_KEY", ""),
+    timeoutMs: envInt("SIGNAL_FEED_TIMEOUT_MS", 15_000),
+    minIntervalMs: envInt("SIGNAL_FEED_MIN_INTERVAL_MS", 1500),
+    recentDays: envInt("SIGNAL_FEED_RECENT_DAYS", 7),
+    recentLimit: envInt("SIGNAL_FEED_RECENT_LIMIT", 100),
+    maxCasesPerRun: envInt("SIGNAL_FEED_MAX_CASES_PER_RUN", 6)
   },
   priorityFeed: {
     enabled: envAnyBool(["PRIORITY_FEED_ENABLED", buildLegacyPriorityFeedEnvKey("ENABLED")], true),
