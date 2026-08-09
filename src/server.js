@@ -265,6 +265,32 @@ function spawnDetachedTask(args = [], extraEnv = {}) {
   };
 }
 
+function isSuccessfulSyncModeDue(mode, minimumIntervalMs) {
+  const latest = store.db
+    .prepare(`
+      SELECT finished_at, started_at
+      FROM sync_runs
+      WHERE provider = 'system'
+        AND mode = ?
+        AND status IN ('succeeded', 'completed')
+      ORDER BY COALESCE(finished_at, started_at) DESC
+      LIMIT 1
+    `)
+    .get(String(mode || "").trim());
+  const latestAt = Date.parse(latest?.finished_at || latest?.started_at || "");
+  if (!Number.isFinite(latestAt)) {
+    return true;
+  }
+  return Date.now() - latestAt >= Math.max(Number(minimumIntervalMs || 0), 60 * 1000);
+}
+
+function spawnDetachedTaskIfDue(mode, minimumIntervalMs) {
+  if (!isSuccessfulSyncModeDue(mode, minimumIntervalMs)) {
+    return { spawned: false, mode, reason: "not-due" };
+  }
+  return spawnDetachedTask(["--sync-only", mode]);
+}
+
 function getSyncModeMaxRuntimeMs(mode = "recent") {
   return mode === "backfill"
     ? Number(config.sync?.backfillMaxRuntimeMs || 0)
@@ -4143,9 +4169,13 @@ async function main() {
   }
 
   if (config.sync.enableScheduler) {
+    const recentCheckIntervalMs = Math.min(
+      Math.max(Number(config.sync.recentSchedulerCheckIntervalMs || 5 * 60 * 1000), 60 * 1000),
+      Math.max(Number(config.sync.pollIntervalMs || 30 * 60 * 1000), 60 * 1000)
+    );
     setInterval(() => {
-      spawnDetachedTask(["--sync-only", "recent"]);
-    }, config.sync.pollIntervalMs);
+      spawnDetachedTaskIfDue("recent", config.sync.pollIntervalMs);
+    }, recentCheckIntervalMs);
   }
 
   if (config.sync.watchdogEnabled) {
@@ -4160,16 +4190,22 @@ async function main() {
 
   if (config.sync.enableBackfillScheduler) {
     setTimeout(() => {
-      spawnDetachedTask(["--sync-only", "backfill"]);
+      if (syncService.getBackfillStatus().pending) {
+        spawnDetachedTaskIfDue("backfill", config.sync.backfillIntervalMs);
+      }
     }, config.sync.bootstrapBackfillDelayMs);
 
+    const backfillCheckIntervalMs = Math.min(
+      Math.max(Number(config.sync.backfillSchedulerCheckIntervalMs || 15 * 60 * 1000), 5 * 60 * 1000),
+      Math.max(Number(config.sync.backfillIntervalMs || 60 * 60 * 1000), 5 * 60 * 1000)
+    );
     setInterval(() => {
       if (!syncService.getBackfillStatus().pending) {
         return;
       }
 
-      spawnDetachedTask(["--sync-only", "backfill"]);
-    }, config.sync.backfillIntervalMs);
+      spawnDetachedTaskIfDue("backfill", config.sync.backfillIntervalMs);
+    }, backfillCheckIntervalMs);
   }
 
   if (courtListener.hasDocketAlertAccess()) {
