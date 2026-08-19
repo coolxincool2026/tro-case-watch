@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY public ./public
-COPY seed ./seed
+RUN mkdir -p ./seed
 COPY src ./src
 
 EXPOSE 4127
