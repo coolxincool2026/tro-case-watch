@@ -55,6 +55,8 @@ const mimeTypes = {
 };
 
 const currentScriptPath = fileURLToPath(import.meta.url);
+const detachedTaskExitGraceMs = 30 * 1000;
+const detachedTaskKillGraceMs = 10 * 1000;
 
 ensureSeedDatabase();
 
@@ -229,6 +231,60 @@ function canPreclaimDetachedTask(mode) {
   return standaloneSyncTaskLockMinutes.has(mode);
 }
 
+function getDetachedTaskMaxRuntimeMs(mode) {
+  if (mode !== "recent" && mode !== "backfill") {
+    return 0;
+  }
+  return Math.max(getSyncModeMaxRuntimeMs(mode), 60 * 1000);
+}
+
+function stopDetachedTaskProcessGroup(child, signal) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) {
+    return false;
+  }
+  try {
+    process.kill(-child.pid, signal);
+    return true;
+  } catch (error) {
+    if (error?.code !== "ESRCH") {
+      console.error(`[spawn-guard] failed signal=${signal} pid=${child.pid}: ${error.message}`);
+    }
+    return false;
+  }
+}
+
+function superviseDetachedTask(child, mode) {
+  const maxRuntimeMs = getDetachedTaskMaxRuntimeMs(mode);
+  if (!maxRuntimeMs) {
+    return;
+  }
+
+  let killTimer = null;
+  const timeoutTimer = setTimeout(() => {
+    console.error(`[spawn-guard] terminating overdue task=${mode} pid=${child.pid}`);
+    if (!stopDetachedTaskProcessGroup(child, "SIGTERM")) {
+      return;
+    }
+    killTimer = setTimeout(() => {
+      if (stopDetachedTaskProcessGroup(child, "SIGKILL")) {
+        console.error(`[spawn-guard] killed unresponsive task=${mode} pid=${child.pid}`);
+      }
+    }, detachedTaskKillGraceMs);
+    killTimer.unref?.();
+  }, maxRuntimeMs + detachedTaskExitGraceMs);
+  timeoutTimer.unref?.();
+
+  child.once("exit", (code, signal) => {
+    clearTimeout(timeoutTimer);
+    if (killTimer) {
+      clearTimeout(killTimer);
+    }
+    if (code || signal) {
+      console.warn(`[spawn-guard] task=${mode} pid=${child.pid} exited code=${code ?? "null"} signal=${signal || "none"}`);
+    }
+  });
+}
+
 function spawnDetachedTask(args = [], extraEnv = {}) {
   const mode = getDetachedSyncOnlyMode(args);
   const env = {
@@ -255,8 +311,9 @@ function spawnDetachedTask(args = [], extraEnv = {}) {
     cwd: path.dirname(config.publicDir),
     env,
     detached: true,
-    stdio: "ignore"
+    stdio: ["ignore", "inherit", "inherit"]
   });
+  superviseDetachedTask(child, mode);
   child.unref();
   return {
     spawned: true,
@@ -308,7 +365,7 @@ function reapAndRecoverStaleSyncRuns() {
     recentReaped = store.reapStaleSyncRuns("system", {
       mode: "recent",
       heartbeatTimeoutMs,
-      maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("recent"), 60 * 1000),
+      maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("recent") + 60 * 1000, 60 * 1000),
       reasonPrefix: "recent watchdog auto-cleared stale run"
     });
   } catch (error) {
@@ -330,7 +387,7 @@ function reapAndRecoverStaleSyncRuns() {
     backfillReaped = store.reapStaleSyncRuns("system", {
       mode: "backfill",
       heartbeatTimeoutMs,
-      maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("backfill"), 60 * 1000),
+      maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("backfill") + 60 * 1000, 60 * 1000),
       reasonPrefix: "backfill watchdog auto-cleared stale run"
     });
   } catch (error) {

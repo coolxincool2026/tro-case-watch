@@ -2484,43 +2484,70 @@ export class Store {
     };
   }
 
-  cleanupWindowEmailArtifacts({ vacuum = false } = {}) {
-    const checkpointsDeleted = Number(
-      this.db
-        .prepare(`DELETE FROM checkpoints WHERE checkpoint_key LIKE 'window-email-report:%'`)
-        .run()?.changes || 0
-    );
-    const syncRunsDeleted = Number(
-      this.db
-        .prepare(`DELETE FROM sync_runs WHERE provider = 'window-email'`)
-        .run()?.changes || 0
-    );
-    const reportCutoffIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const reportSyncRunsDeleted = Number(
-      this.db
-        .prepare(`
-          DELETE FROM sync_runs
-          WHERE provider IN ('daily-email', 'tro-daily-roundup')
-            AND mode = 'report'
-            AND started_at < ?
-        `)
-        .run(reportCutoffIso)?.changes || 0
-    );
-    const reportCheckpointsDeleted = Number(
-      this.db
-        .prepare(`
-          DELETE FROM checkpoints
-          WHERE (
-              checkpoint_key LIKE 'daily-email-report:%'
-              OR checkpoint_key LIKE 'tro-daily-roundup:%'
-            )
-            AND updated_at < ?
-        `)
-        .run(reportCutoffIso)?.changes || 0
-    );
+  cleanupWindowEmailArtifacts({ vacuum = false, terminalRetentionDays = 30 } = {}) {
+    const retentionDays = Math.min(Math.max(Number(terminalRetentionDays || 30), 7), 365);
+    const reportCutoffIso = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    let checkpointsDeleted = 0;
+    let syncRunsDeleted = 0;
+    let reportSyncRunsDeleted = 0;
+    let reportCheckpointsDeleted = 0;
+    let terminalSyncRunsDeleted = 0;
 
-    if (vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0 || reportSyncRunsDeleted > 0 || reportCheckpointsDeleted > 0)) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      checkpointsDeleted = Number(
+        this.db
+          .prepare(`DELETE FROM checkpoints WHERE checkpoint_key LIKE 'window-email-report:%'`)
+          .run()?.changes || 0
+      );
+      syncRunsDeleted = Number(
+        this.db
+          .prepare(`DELETE FROM sync_runs WHERE provider = 'window-email'`)
+          .run()?.changes || 0
+      );
+      reportSyncRunsDeleted = Number(
+        this.db
+          .prepare(`
+            DELETE FROM sync_runs
+            WHERE provider IN ('daily-email', 'tro-daily-roundup')
+              AND mode = 'report'
+              AND started_at < ?
+          `)
+          .run(reportCutoffIso)?.changes || 0
+      );
+      reportCheckpointsDeleted = Number(
+        this.db
+          .prepare(`
+            DELETE FROM checkpoints
+            WHERE (
+                checkpoint_key LIKE 'daily-email-report:%'
+                OR checkpoint_key LIKE 'tro-daily-roundup:%'
+              )
+              AND updated_at < ?
+          `)
+          .run(reportCutoffIso)?.changes || 0
+      );
+      terminalSyncRunsDeleted = Number(
+        this.db
+          .prepare(`
+            DELETE FROM sync_runs
+            WHERE status IN ('succeeded', 'failed', 'completed', 'skipped')
+              AND COALESCE(finished_at, started_at) < ?
+          `)
+          .run(reportCutoffIso)?.changes || 0
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+
+    const totalDeleted = checkpointsDeleted + syncRunsDeleted + reportSyncRunsDeleted + reportCheckpointsDeleted + terminalSyncRunsDeleted;
+    if (vacuum && totalDeleted > 0) {
       this.db.exec("VACUUM;");
+      this.db.exec("PRAGMA optimize;");
     }
 
     return {
@@ -2528,10 +2555,10 @@ export class Store {
       syncRunsDeleted,
       reportSyncRunsDeleted,
       reportCheckpointsDeleted,
-      reportRetentionDays: 30,
-      vacuumed: Boolean(
-        vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0 || reportSyncRunsDeleted > 0 || reportCheckpointsDeleted > 0)
-      )
+      terminalSyncRunsDeleted,
+      reportRetentionDays: retentionDays,
+      terminalSyncRunRetentionDays: retentionDays,
+      vacuumed: Boolean(vacuum && totalDeleted > 0)
     };
   }
 
