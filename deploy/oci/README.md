@@ -1,7 +1,7 @@
-# Oracle Cloud Always Free deployment
+# Ubuntu VPS deployment
 
-Use an Always Free `VM.Standard.A1.Flex` instance with Ubuntu 24.04, 2 OCPUs,
-12 GB RAM, and a 100 GB boot volume. Create it in the account's home region.
+Use a clean Ubuntu 24.04 server with at least 4 GB RAM, 2 CPU cores, and an
+80 GB SSD. The deployment works on x86_64 and ARM64 hosts.
 
 Network ingress should allow:
 
@@ -19,7 +19,9 @@ The Compose deployment separates the public web process from the scheduler:
 
 Production data is mounted from `/var/lib/tro-case-watch/data`. Run
 `install-docker.sh` once on a new Ubuntu instance, then restore the verified
-database and `.env` before running `deploy.sh`.
+database and `.env` before running `deploy.sh`. Run `harden-host.sh` after
+confirming SSH public-key access; it disables password login, enables UFW,
+fail2ban, and unattended security upgrades.
 
 Do not reuse credentials or SSH keys from a server that has changed host keys
 or rejected previously valid administrator access. Rotate third-party tokens
