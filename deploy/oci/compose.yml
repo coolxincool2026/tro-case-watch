@@ -1,5 +1,6 @@
 services:
   app:
+    image: tro-case-watch:production
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -42,6 +43,7 @@ services:
         max-file: "5"
 
   worker:
+    image: tro-case-watch:production
     build:
       context: ../..
       dockerfile: Dockerfile
