@@ -1049,6 +1049,18 @@ export class CaseSyncService {
       return await this.store.batchMutations(async () => {
       let discoverySourceAvailable = false;
       try {
+        const signalFeedResult = await this.syncSignalFeedRecent(mode);
+        stats.signalFeedCasesUpserted += signalFeedResult.casesUpserted || 0;
+        stats.signalFeedEntriesUpserted += signalFeedResult.docketEntriesUpserted || 0;
+        discoverySourceAvailable = discoverySourceAvailable || (signalFeedResult.itemsFetched || 0) > 0;
+        if (signalFeedResult.note) {
+          stats.notes.push(signalFeedResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`优先信号源补抓跳过：${error.message}`);
+      }
+
+      try {
         const courtFeedResult = await this.syncCourtFeedsRecent(mode);
         stats.courtFeedCasesUpserted += courtFeedResult.casesUpserted || 0;
         stats.courtFeedEntriesUpserted += courtFeedResult.docketEntriesUpserted || 0;
@@ -1059,18 +1071,6 @@ export class CaseSyncService {
         }
       } catch (error) {
         stats.notes.push(`官方法院 RSS 补源跳过：${error.message}`);
-      }
-
-      try {
-        const signalFeedResult = await this.syncSignalFeedRecent(mode);
-        stats.signalFeedCasesUpserted += signalFeedResult.casesUpserted || 0;
-        stats.signalFeedEntriesUpserted += signalFeedResult.docketEntriesUpserted || 0;
-        discoverySourceAvailable = discoverySourceAvailable || (signalFeedResult.itemsFetched || 0) > 0;
-        if (signalFeedResult.note) {
-          stats.notes.push(signalFeedResult.note);
-        }
-      } catch (error) {
-        stats.notes.push(`优先信号源补抓跳过：${error.message}`);
       }
 
       try {
