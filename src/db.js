@@ -752,15 +752,15 @@ function buildCaseView(row) {
 
 function caseSourceRank(caseLike = {}) {
   switch (String(caseLike.primary_source || "").toLowerCase()) {
+    case "courtfeed":
+      return 8;
+    case SIGNAL_FEED_PROVIDER_KEY:
+      return 7;
     case "sriplaw":
     case "gbc":
       return 6;
-    case SIGNAL_FEED_PROVIDER_KEY:
-      return 5;
     case PRIORITY_FEED_ENTRY_SOURCE:
       return 5;
-    case "courtfeed":
-      return 4;
     case "courtlistener":
       return 3;
     case "pacermonitor":

@@ -270,13 +270,13 @@ export const config = {
   signalFeed: {
     enabled: envBool("SIGNAL_FEED_ENABLED", false),
     publicCasesUrl: env("SIGNAL_FEED_PUBLIC_CASES_URL", ""),
-    apiBaseUrl: env("SIGNAL_FEED_API_BASE_URL", ""),
+    apiBaseUrl: env("SIGNAL_FEED_API_BASE_URL", "https://api.trohub.com/v1"),
     apiKey: env("SIGNAL_FEED_API_KEY", ""),
     timeoutMs: envInt("SIGNAL_FEED_TIMEOUT_MS", 15_000),
     minIntervalMs: envInt("SIGNAL_FEED_MIN_INTERVAL_MS", 1500),
     recentDays: envInt("SIGNAL_FEED_RECENT_DAYS", 7),
     recentLimit: envInt("SIGNAL_FEED_RECENT_LIMIT", 100),
-    maxCasesPerRun: envInt("SIGNAL_FEED_MAX_CASES_PER_RUN", 6)
+    maxCasesPerRun: envInt("SIGNAL_FEED_MAX_CASES_PER_RUN", 100)
   },
   priorityFeed: {
     enabled: envAnyBool(["PRIORITY_FEED_ENABLED", buildLegacyPriorityFeedEnvKey("ENABLED")], true),

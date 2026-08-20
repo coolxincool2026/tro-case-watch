@@ -190,7 +190,8 @@ export class SignalFeedClient {
     this.minIntervalMs = Math.max(Number(options.minIntervalMs || 1500), 0);
     this.recentDays = Math.min(Math.max(Number(options.recentDays || 7), 1), 7);
     this.recentLimit = Math.min(Math.max(Number(options.recentLimit || 100), 1), 100);
-    this.maxCasesPerRun = Math.min(Math.max(Number(options.maxCasesPerRun || 6), 1), 20);
+    // Public discovery exposes 15 rows; the authenticated API supports up to 100.
+    this.maxCasesPerRun = Math.min(Math.max(Number(options.maxCasesPerRun || 100), 1), 100);
     this.lastRequestAt = 0;
   }
 

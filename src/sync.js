@@ -1615,7 +1615,8 @@ export class CaseSyncService {
 
       const savedCase = this.store.upsertCase({
         source_case_key: existingCase?.source_case_key || `${SIGNAL_FEED_PROVIDER_KEY}:${item.docketId || normalizeDocket(docketNumber)}`,
-        primary_source: existingCase?.primary_source || SIGNAL_FEED_PROVIDER_KEY,
+        // Let Store apply source authority instead of pinning an older source.
+        primary_source: SIGNAL_FEED_PROVIDER_KEY,
         source_case_id: existingCase?.source_case_id || item.docketId || docketNumber,
         courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
         pacer_case_id: existingCase?.pacer_case_id ?? null,

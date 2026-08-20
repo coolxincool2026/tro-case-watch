@@ -8,6 +8,7 @@
     "nodemailer": "^9.0.3"
   },
   "scripts": {
+    "test": "node --test",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "sync:recent": "node src/server.js --sync-only recent",
