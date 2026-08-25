@@ -217,6 +217,11 @@ export const config = {
     discoveryStartDate: env("SYNC_DISCOVERY_START_DATE", "2025-01-01"),
     pollIntervalMs: envInt("POLL_INTERVAL_MS", 30 * 60 * 1000),
     recentSchedulerCheckIntervalMs: envInt("RECENT_SCHEDULER_CHECK_INTERVAL_MS", 5 * 60 * 1000),
+    sourceSchedulerCheckIntervalMs: envInt("SOURCE_SCHEDULER_CHECK_INTERVAL_MS", 60 * 1000),
+    courtFeedsIntervalMs: envInt("COURT_FEEDS_SCHEDULER_INTERVAL_MS", 15 * 60 * 1000),
+    recentFilingsIntervalMs: envInt("RECENT_FILINGS_SCHEDULER_INTERVAL_MS", 20 * 60 * 1000),
+    lawFirmsIntervalMs: envInt("LAW_FIRMS_SCHEDULER_INTERVAL_MS", 30 * 60 * 1000),
+    courtListenerDocketIntervalMs: envInt("COURTLISTENER_DOCKET_SCHEDULER_INTERVAL_MS", 15 * 60 * 1000),
     backfillIntervalMs: envInt("BACKFILL_INTERVAL_MS", 60 * 60 * 1000),
     backfillSchedulerCheckIntervalMs: envInt("BACKFILL_SCHEDULER_CHECK_INTERVAL_MS", 15 * 60 * 1000),
     watchdogIntervalMs: envInt("SYNC_WATCHDOG_INTERVAL_MS", 2 * 60 * 1000),
@@ -276,7 +281,12 @@ export const config = {
     minIntervalMs: envInt("SIGNAL_FEED_MIN_INTERVAL_MS", 1500),
     recentDays: envInt("SIGNAL_FEED_RECENT_DAYS", 7),
     recentLimit: envInt("SIGNAL_FEED_RECENT_LIMIT", 100),
-    maxCasesPerRun: envInt("SIGNAL_FEED_MAX_CASES_PER_RUN", 100)
+    maxCasesPerRun: envInt("SIGNAL_FEED_MAX_CASES_PER_RUN", 100),
+    refreshMaxCasesPerRun: envInt("SIGNAL_FEED_REFRESH_MAX_CASES_PER_RUN", 10),
+    staleAfterMinutes: envInt("SIGNAL_FEED_STALE_AFTER_MINUTES", 60),
+    schedulerIntervalMs: envInt("SIGNAL_FEED_SCHEDULER_INTERVAL_MS", 10 * 60 * 1000),
+    schedulerCheckIntervalMs: envInt("SIGNAL_FEED_SCHEDULER_CHECK_INTERVAL_MS", 60 * 1000),
+    schedulerBootstrapDelayMs: envInt("SIGNAL_FEED_SCHEDULER_BOOTSTRAP_DELAY_MS", 30 * 1000)
   },
   priorityFeed: {
     enabled: envAnyBool(["PRIORITY_FEED_ENABLED", buildLegacyPriorityFeedEnvKey("ENABLED")], true),

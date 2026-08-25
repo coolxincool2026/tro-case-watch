@@ -494,3 +494,11 @@ export function docketLooksLike(value) {
 export function normalizeDocket(value) {
   return normalizeText(value).replace(/^[a-z]{1,4}[-:]/i, "").replace(/^\d+:/, "");
 }
+
+export function normalizeDocketIdentity(value) {
+  return normalizeText(value)
+    .replace(/^[a-z]{1,6}[-:](?=\d+:)/i, "")
+    .replace(/^(\d+):20(\d{2})-/i, "$1:$2-")
+    .replace(/^20(\d{2})-/i, "$1-")
+    .replace(/\s+/g, "");
+}

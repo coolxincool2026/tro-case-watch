@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { buildTagsMarker, classifyCase, discoveryPresets } from "./queries.js";
-import { docketLooksLike, normalizeDocket, normalizeText } from "./insights.js";
+import { docketLooksLike, normalizeDocket, normalizeDocketIdentity, normalizeText } from "./insights.js";
 import {
   PRIORITY_FEED_DISCOVERY_CHECKPOINT,
   PRIORITY_FEED_ENTRY_SOURCE,
@@ -437,7 +437,7 @@ function buildPriorityFeedDiscoveryIndex(rows = []) {
   const byPriorityUrl = new Map();
 
   for (const row of rows) {
-    const docketKey = normalizeDocket(row.docket_number);
+    const docketKey = normalizeDocketIdentity(row.docket_number);
     if (docketKey) {
       if (!byDocket.has(docketKey)) {
         byDocket.set(docketKey, []);
@@ -471,7 +471,7 @@ function findBestPriorityFeedDiscoveryCase(item, index) {
     return index.byPriorityUrl.get(normalizedUrl);
   }
 
-  const docketKey = normalizeDocket(item.docketNumber);
+  const docketKey = normalizeDocketIdentity(item.docketNumber);
   if (!docketKey) {
     return null;
   }
@@ -608,7 +608,7 @@ function hasCaseLevelActivityLead(store, caseRow = {}) {
 }
 
 function buildCourtDocketKey(courtId, docketNumber) {
-  const normalizedDocket = normalizeDocket(docketNumber);
+  const normalizedDocket = normalizeDocketIdentity(docketNumber);
   if (!normalizedDocket) {
     return "";
   }
@@ -1614,7 +1614,7 @@ export class CaseSyncService {
       };
 
       const savedCase = this.store.upsertCase({
-        source_case_key: existingCase?.source_case_key || `${SIGNAL_FEED_PROVIDER_KEY}:${item.docketId || normalizeDocket(docketNumber)}`,
+        source_case_key: existingCase?.source_case_key || `${SIGNAL_FEED_PROVIDER_KEY}:${item.docketId || normalizeDocketIdentity(docketNumber)}`,
         // Let Store apply source authority instead of pinning an older source.
         primary_source: SIGNAL_FEED_PROVIDER_KEY,
         source_case_id: existingCase?.source_case_id || item.docketId || docketNumber,
@@ -1651,7 +1651,7 @@ export class CaseSyncService {
 
       for (const entry of entries) {
         const documentNumber = entry.documentNumber ?? null;
-        const sourceEntryId = entry.entryId || `${item.docketId || normalizeDocket(docketNumber)}:${documentNumber || entry.filedAt || crypto.randomUUID()}`;
+        const sourceEntryId = entry.entryId || `${item.docketId || normalizeDocketIdentity(docketNumber)}:${documentNumber || entry.filedAt || crypto.randomUUID()}`;
         const savedEntry = this.store.upsertDocketEntry({
           case_id: savedCase.id,
           source_entry_key: `${SIGNAL_FEED_PROVIDER_KEY}:${sourceEntryId}`,
@@ -1699,12 +1699,49 @@ export class CaseSyncService {
 
     return this.store.batchMutations(async () => {
       const result = await this.signalFeed.fetchRecent({ hydrate: true });
-      const ingest = this.ingestSignalFeedItems(result.items || []);
+      const recentItems = result.items || [];
+      const ingest = this.ingestSignalFeedItems(recentItems);
+      const recentDocketIds = new Set(recentItems.map((item) => String(item.docketId || "")).filter(Boolean));
+      const candidates = this.store.listSignalFeedRefreshCandidates({
+        limit: this.config.signalFeed.refreshMaxCasesPerRun,
+        staleAfterMinutes: this.config.signalFeed.staleAfterMinutes
+      });
+      let refreshedCases = 0;
+      let refreshErrors = 0;
+
+      for (const caseRow of candidates) {
+        const signalRaw = caseRow.raw?.signal_feed || {};
+        if (signalRaw.docketId && recentDocketIds.has(String(signalRaw.docketId))) {
+          continue;
+        }
+        try {
+          const item = await this.signalFeed.fetchKnownCase({
+            docketId: signalRaw.docketId,
+            docketNumber: caseRow.docket_number,
+            detailUrl: signalRaw.detailUrl,
+            caseName: caseRow.case_name,
+            courtId: caseRow.court_id,
+            courtName: caseRow.court_name,
+            dateFiled: caseRow.date_filed
+          });
+          if (!item) {
+            continue;
+          }
+          const refreshed = this.ingestSignalFeedItems([item]);
+          ingest.casesUpserted += refreshed.casesUpserted;
+          ingest.docketEntriesUpserted += refreshed.docketEntriesUpserted;
+          refreshedCases += 1;
+        } catch {
+          refreshErrors += 1;
+        }
+      }
       return {
-        itemsFetched: Number(result.items?.length || 0),
+        itemsFetched: Number(recentItems.length),
+        refreshedCases,
+        refreshErrors,
         casesUpserted: ingest.casesUpserted,
         docketEntriesUpserted: ingest.docketEntriesUpserted,
-        note: `优先信号源本轮检查 ${Number(result.items?.length || 0)} 个最新案件，写入 ${ingest.casesUpserted} 个案件、${ingest.docketEntriesUpserted} 条 docket。`
+        note: `优先信号源本轮检查 ${Number(recentItems.length)} 个最新案件、复查 ${refreshedCases} 个已知案件，写入 ${ingest.casesUpserted} 个案件、${ingest.docketEntriesUpserted} 条 docket${refreshErrors ? `，${refreshErrors} 个复查暂时失败` : ""}。`
       };
     });
   }
@@ -1831,7 +1868,7 @@ export class CaseSyncService {
       const savedCase = this.store.upsertCase({
         source_case_key:
           existingCase?.source_case_key ||
-          `recentfilings:${item.sourceId}:${normalizeDocket(item.docketNumber)}`,
+          `recentfilings:${item.sourceId}:${normalizeDocketIdentity(item.docketNumber)}`,
         primary_source: existingCase?.primary_source || "recentfilings",
         source_case_id: existingCase?.source_case_id || item.pacerCaseId || item.caseUrl || item.docketNumber,
         courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
@@ -2163,7 +2200,7 @@ export class CaseSyncService {
       const savedCase = this.store.upsertCase({
         source_case_key:
           existingCase?.source_case_key ||
-          `courtfeed:${item.courtId}:${item.caseId || item.reportCaseId || normalizeDocket(item.docketNumber)}`,
+          `courtfeed:${item.courtId}:${item.caseId || item.reportCaseId || normalizeDocketIdentity(item.docketNumber)}`,
         primary_source: existingCase?.primary_source || "courtfeed",
         source_case_id: existingCase?.source_case_id || item.caseId || item.reportCaseId || item.docketNumber,
         courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
@@ -2462,7 +2499,7 @@ export class CaseSyncService {
       const savedCase = this.store.upsertCase({
         source_case_key:
           existingCase?.source_case_key ||
-          `${item.sourceId}:${item.courtId || normalizeLookupText(item.courtName) || "unknown"}:${normalizeDocket(item.docketNumber)}`,
+          `${item.sourceId}:${item.courtId || normalizeLookupText(item.courtName) || "unknown"}:${normalizeDocketIdentity(item.docketNumber)}`,
         primary_source: existingCase?.primary_source || item.sourceId,
         source_case_id: existingCase?.source_case_id || item.sourceCaseId || item.docketNumber,
         courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
@@ -5234,11 +5271,6 @@ export class CaseSyncService {
   }
 
   async syncSingleCourtListenerDocket(caseRow) {
-    if (this.store.caseGroupHasPriorityFeedAuthority(caseRow)) {
-      this.store.touchCaseDocketSync(caseRow.id);
-      return { enriched: false, reason: "priority-authoritative" };
-    }
-
     const docketId = caseRow.courtlistener_docket_id;
     if (!docketId) {
       return { enriched: false, reason: "not-found" };

@@ -4219,6 +4219,39 @@ async function main() {
     return;
   }
 
+  const sourceSchedulerCheckIntervalMs = Math.max(
+    Number(config.sync.sourceSchedulerCheckIntervalMs || 60 * 1000),
+    60 * 1000
+  );
+  const scheduleSourceMode = (mode, minimumIntervalMs, bootstrapDelayMs) => {
+    setTimeout(() => {
+      spawnDetachedTaskIfDue(mode, minimumIntervalMs);
+    }, Math.max(Number(bootstrapDelayMs || 0), 10 * 1000));
+    setInterval(() => {
+      spawnDetachedTaskIfDue(mode, minimumIntervalMs);
+    }, sourceSchedulerCheckIntervalMs);
+  };
+
+  if (config.signalFeed?.enabled) {
+    scheduleSourceMode(
+      SIGNAL_FEED_PROVIDER_KEY,
+      config.signalFeed.schedulerIntervalMs,
+      config.signalFeed.schedulerBootstrapDelayMs
+    );
+  }
+  if (config.courtFeeds?.enabled) {
+    scheduleSourceMode("courtfeeds", config.sync.courtFeedsIntervalMs, 90 * 1000);
+  }
+  if (config.recentFilings?.enabled) {
+    scheduleSourceMode("recentfilings", config.sync.recentFilingsIntervalMs, 150 * 1000);
+  }
+  if (config.lawFirms?.enabled) {
+    scheduleSourceMode("lawfirms", config.sync.lawFirmsIntervalMs, 210 * 1000);
+  }
+  if (courtListener.hasDocketAccess()) {
+    scheduleSourceMode("courtlistener-docket", config.sync.courtListenerDocketIntervalMs, 270 * 1000);
+  }
+
   if (config.sync.bootstrapSync) {
     setTimeout(() => {
       spawnDetachedTask(["--sync-only", "recent"]);

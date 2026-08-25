@@ -52,3 +52,54 @@ test("authenticated discovery accepts the official 100-case ceiling", () => {
 
   assert.equal(client.getStatus().maxCasesPerRun, 100);
 });
+
+test("public discovery falls back to the localized home page", async () => {
+  const originalFetch = globalThis.fetch;
+  const homeHtml = `<table>${buildPublicRows(2)}</table>`;
+  const requested = [];
+
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    return new Response(String(url).endsWith("/en/") ? homeHtml : "<html></html>", { status: 200 });
+  };
+
+  try {
+    const client = new SignalFeedClient({
+      enabled: true,
+      publicCasesUrl: "https://example.test/en/cases/",
+      minIntervalMs: 1
+    });
+    const items = await client.fetchPublicRecent();
+
+    assert.equal(items.length, 2);
+    assert.deepEqual(requested, ["https://example.test/en/cases/", "https://example.test/en/"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("known cases retry canonical public detail URL variants", async () => {
+  const client = new SignalFeedClient({
+    enabled: true,
+    publicCasesUrl: "https://example.test/en/cases/"
+  });
+  const requested = [];
+  client.fetchPublicDetail = async (url) => {
+    requested.push(url);
+    if (url.includes("/en/cases/")) {
+      const error = new Error("not found");
+      error.status = 404;
+      throw error;
+    }
+    return { docketId: "abc", docketNumber: "2:26-cv-00651", entries: [{ entryId: "1" }] };
+  };
+
+  const item = await client.fetchKnownCase({
+    docketId: "abc",
+    docketNumber: "2:26-cv-00651",
+    detailUrl: "https://example.test/en/cases/abc-case"
+  });
+
+  assert.equal(item.entries.length, 1);
+  assert.ok(requested.some((url) => url.includes("/cases/") && !url.includes("/en/cases/")));
+});

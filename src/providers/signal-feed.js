@@ -256,9 +256,69 @@ export class SignalFeedClient {
     return { ...candidate, ...(detail || {}) };
   }
 
+  async fetchKnownCase(candidate = {}) {
+    if (!this.enabled) {
+      return null;
+    }
+
+    if (this.apiKey && this.apiBaseUrl && candidate.docketId) {
+      return this.fetchApiEntries(candidate);
+    }
+
+    if (!candidate.detailUrl) {
+      return null;
+    }
+
+    let lastError = null;
+    for (const detailUrl of this.buildPublicDetailCandidates(candidate.detailUrl)) {
+      try {
+        const detail = await this.fetchPublicDetail(detailUrl);
+        if (detail) {
+          return { ...candidate, ...detail, detailUrl };
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+    return null;
+  }
+
+  buildPublicDetailCandidates(detailUrl) {
+    const urls = new Set();
+    const append = (value) => {
+      const normalized = String(value || "").trim();
+      if (!normalized) {
+        return;
+      }
+      urls.add(normalized);
+      urls.add(normalized.endsWith("/") ? normalized.slice(0, -1) : `${normalized}/`);
+    };
+
+    append(detailUrl);
+    append(String(detailUrl || "").replace("/en/cases/", "/cases/"));
+    append(String(detailUrl || "").replace("/cases/", "/en/cases/"));
+    return [...urls];
+  }
+
   async fetchPublicRecent() {
     const html = await this.requestText(this.publicCasesUrl);
-    return parsePublicRows(html, this.publicCasesUrl);
+    const rows = parsePublicRows(html, this.publicCasesUrl);
+    if (rows.length) {
+      return rows;
+    }
+
+    const pageUrl = new URL(this.publicCasesUrl);
+    const languageRoot = pageUrl.pathname.startsWith("/en/") ? "/en/" : "/";
+    const fallbackUrl = new URL(languageRoot, pageUrl.origin).toString();
+    if (fallbackUrl === this.publicCasesUrl) {
+      return rows;
+    }
+    const fallbackHtml = await this.requestText(fallbackUrl);
+    return parsePublicRows(fallbackHtml, fallbackUrl);
   }
 
   async fetchPublicDetail(detailUrl) {

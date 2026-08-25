@@ -409,6 +409,15 @@ function normalizeDocketLookupCoreKey(value) {
     .replace(/[^a-z0-9]+/g, "");
 }
 
+function docketNumbersMatchForLookup(left, right) {
+  if (normalizeDocketLookupCoreKey(left) !== normalizeDocketLookupCoreKey(right)) {
+    return false;
+  }
+  const leftOffice = String(parseDocketNumber(left) || left || "").match(/\b(\d+):(?:20)?\d{2}-cv-/i)?.[1];
+  const rightOffice = String(parseDocketNumber(right) || right || "").match(/\b(\d+):(?:20)?\d{2}-cv-/i)?.[1];
+  return !leftOffice || !rightOffice || leftOffice === rightOffice;
+}
+
 function clean61troValue(value) {
   return cleanText(value)
     .replace(/\s*翻译\s*$/u, "")
@@ -820,7 +829,7 @@ async function findMatching61troItemFromDetailCandidates(client, source, links, 
       const item = parse61troCasePage(detailHtml, candidateUrl, source);
       if (
         item?.docketNumber &&
-        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+        docketNumbersMatchForLookup(item.docketNumber, docketNumber) &&
         lawFirmMatchesCourtName(item, courtName)
       ) {
         return item;
@@ -1334,7 +1343,7 @@ export class LawFirmClient {
       const item = parse61troCasePage(pageHtml, detailUrl, source);
       if (
         item?.docketNumber &&
-        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+        docketNumbersMatchForLookup(item.docketNumber, docketNumber) &&
         lawFirmMatchesCourtName(item, courtName)
       ) {
         return item;
@@ -1362,7 +1371,7 @@ export class LawFirmClient {
         const item = parse61troCasePage(pageHtml, detailUrl, source);
         if (
           item?.docketNumber &&
-          normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+          docketNumbersMatchForLookup(item.docketNumber, docketNumber) &&
           lawFirmMatchesCourtName(item, courtName)
         ) {
           return item;
@@ -1404,7 +1413,7 @@ export class LawFirmClient {
       const item = parse61troCasePage(pageHtml, detailUrl, source);
       if (
         item?.docketNumber &&
-        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+        docketNumbersMatchForLookup(item.docketNumber, docketNumber) &&
         lawFirmMatchesCourtName(item, courtName)
       ) {
         return item;

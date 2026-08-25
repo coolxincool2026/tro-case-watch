@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { deriveCaseInsights, docketLooksLike, normalizeDocket, normalizeText } from "./insights.js";
+import {
+  deriveCaseInsights,
+  docketLooksLike,
+  normalizeDocket,
+  normalizeDocketIdentity,
+  normalizeText
+} from "./insights.js";
 import { buildTagsMarker } from "./queries.js";
 import { SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
 import {
@@ -592,7 +598,7 @@ function buildCanonicalCourtKey(caseLike) {
 }
 
 function buildCaseIdentityKeys(caseLike) {
-  const docketKey = normalizeDocket(caseLike?.docket_number);
+  const docketKey = normalizeDocketIdentity(caseLike?.docket_number);
   if (!docketKey) {
     return [];
   }
@@ -613,7 +619,7 @@ function buildCaseIdentityKeys(caseLike) {
 }
 
 function buildCanonicalCaseGroupKey(caseLike) {
-  const docketKey = normalizeDocket(caseLike?.docket_number);
+  const docketKey = normalizeDocketIdentity(caseLike?.docket_number);
   const courtKey = buildCanonicalCourtKey(caseLike);
   if (!docketKey || !courtKey) {
     return "";
@@ -3042,7 +3048,7 @@ export class Store {
   }
 
   findCaseByCourtAndDocket({ courtId = "", courtName = "", docketNumber = "", startDate = "2025-01-01" } = {}) {
-    const docketKey = normalizeDocket(docketNumber);
+    const docketKey = normalizeDocketIdentity(docketNumber);
     if (!docketKey) {
       return null;
     }
@@ -3061,6 +3067,30 @@ export class Store {
     }
 
     return null;
+  }
+
+  listSignalFeedRefreshCandidates({ limit = 10, staleAfterMinutes = 60 } = {}) {
+    const normalizedLimit = Math.min(Math.max(Number(limit || 10), 1), 100);
+    const cutoff = new Date(Date.now() - Math.max(Number(staleAfterMinutes || 0), 1) * 60 * 1000).toISOString();
+    return this.db
+      .prepare(`
+        SELECT c.*
+        FROM cases c
+        WHERE json_type(c.raw_json, '$.signal_feed') = 'object'
+          AND (
+            COALESCE(json_extract(c.raw_json, '$.signal_feed.detailUrl'), '') <> ''
+            OR COALESCE(json_extract(c.raw_json, '$.signal_feed.docketId'), '') <> ''
+          )
+          AND COALESCE(json_extract(c.raw_json, '$.signal_feed.syncedAt'), '') < ?
+        ORDER BY
+          CASE WHEN c.date_filed >= date('now', 'start of year') THEN 1 ELSE 0 END DESC,
+          CASE WHEN c.status = 'open' THEN 1 ELSE 0 END DESC,
+          COALESCE(c.priority_activity_at, c.latest_docket_filed_at, c.updated_at, c.date_filed) DESC,
+          c.id DESC
+        LIMIT ?
+      `)
+      .all(cutoff, normalizedLimit)
+      .map(buildCaseView);
   }
 
   getCaseByCourtListenerDocketId(docketId) {
