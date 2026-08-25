@@ -360,6 +360,33 @@ function reapAndRecoverStaleSyncRuns() {
   }
 
   const heartbeatTimeoutMs = Math.max(Number(config.sync?.runHeartbeatTimeoutMs || 0), 30 * 1000);
+  try {
+    const stalledRuns = store.reapStaleSyncRuns("system", {
+      heartbeatTimeoutMs,
+      reasonPrefix: "sync watchdog auto-cleared stalled run"
+    });
+    if (stalledRuns.length) {
+      console.warn(`[watchdog] reaped stalled runs ${stalledRuns.map((row) => `#${row.id}:${row.mode}`).join(", ")}`);
+      const stalledModes = new Set(stalledRuns.map((row) => row.mode));
+      if (stalledModes.has("recent") && config.sync.enableScheduler) {
+        spawnDetachedTask(["--sync-only", "recent"]);
+      }
+      if (
+        stalledModes.has("backfill") &&
+        config.sync.enableBackfillScheduler &&
+        syncService.getBackfillStatus().pending
+      ) {
+        spawnDetachedTask(["--sync-only", "backfill"]);
+      }
+    }
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      console.warn(`[watchdog] skipped stalled-run reap: ${error.message}`);
+    } else {
+      console.error("[watchdog] stalled-run reap failed", error);
+    }
+  }
+
   let recentReaped = [];
   try {
     recentReaped = store.reapStaleSyncRuns("system", {
