@@ -1,3 +1,7 @@
+http://trotracker.com, http://www.trotracker.com {
+  redir https://www.trotracker.com{uri} 301
+}
+
 trotracker.com {
   redir https://www.trotracker.com{uri} permanent
 }
