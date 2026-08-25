@@ -2446,7 +2446,7 @@ export class CaseSyncService {
       const existingCase =
         caseIndex.get(primaryKey) ||
         caseIndex.get(fallbackKey) ||
-        ((!item.courtId && !item.courtName) ? this.store.findCaseByDocketNumber(item.docketNumber, getDiscoveryStartDate(this.config)) : null) ||
+        this.store.findCaseByDocketNumber(item.docketNumber, getDiscoveryStartDate(this.config)) ||
         null;
       const existedBeforeRun = Boolean(existingCase?.id) && preexistingCaseIds.has(Number(existingCase.id));
       const tags = this.augmentLawFirmTags(item, this.classifyLawFirmItem(item));
