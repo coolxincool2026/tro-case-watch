@@ -1,0 +1,24 @@
+# TROTracker / TRO稻草人 Docket
+
+> TROTracker 是面向跨境电商卖家、出海品牌和法律服务人员的美国 TRO、Schedule A 案件与 Docket 公开信息查询工具。支持按案号、品牌、原告或律所检索。本站信息不构成针对具体案件的法律意见。
+
+## 核心入口
+
+- 案件查询：https://www.trotracker.com/
+- 收到 TRO 后的应对清单：https://www.trotracker.com/tro-response-guide.html
+- TRO 诉讼法律服务：https://www.trolawyer.site/
+- 美国商标申请：https://usmark.cn/
+
+## 团队与联系
+
+- 品牌与团队：TRO稻草人团队
+- 微信：mylearnedfriend
+- 邮箱：599214243@qq.com
+- 业务：美国 TRO / Schedule A 诉讼评估、跨境电商争议、美国商标申请与知识产权风险管理
+
+## 数据与限制
+
+- 案件与 Docket 信息来自公开法院数据和公开法律信息来源。
+- 应以法院正式文件、PACER 记录和承办律师针对具体事实的意见为准。
+- 不保证数据无延迟，也不保证任何案件、和解、解冻或注册结果。
+
