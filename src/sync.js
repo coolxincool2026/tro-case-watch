@@ -1266,7 +1266,8 @@ export class CaseSyncService {
     };
 
     if (includeCourtListener) {
-      for (const query of queries) {
+      const lookupQueries = queries.slice(0, docketLooksLike(rawTerm) ? 2 : 3);
+      for (const query of lookupQueries) {
         let payload;
         try {
           payload = await this.courtListener.search({
@@ -2681,50 +2682,52 @@ export class CaseSyncService {
       }
 
       let attempted = false;
-      try {
-        if (candidate.priorityFeed) {
-          attempted = true;
-          priorityFeedTriggered += 1;
-          const result = await this.enrichCaseWithPriorityFeed(caseId, { force: true });
+      let candidateFailed = false;
+      const attemptProvider = async (enabled, onStart, task, onSuccess) => {
+        if (!enabled) {
+          return;
+        }
+        attempted = true;
+        onStart();
+        try {
+          const result = await task();
           if (result.enriched) {
-            priorityFeedSynced += 1;
+            onSuccess();
           }
+        } catch {
+          candidateFailed = true;
         }
+      };
 
-        if (candidate.courtListener) {
-          attempted = true;
-          courtListenerTriggered += 1;
-          const result = await this.enrichCaseWithCourtListener(caseId, { force: true });
-          if (result.enriched) {
-            courtListenerSynced += 1;
-          }
-        }
+      await attemptProvider(
+        candidate.priorityFeed,
+        () => { priorityFeedTriggered += 1; },
+        () => this.enrichCaseWithPriorityFeed(caseId, { force: true }),
+        () => { priorityFeedSynced += 1; }
+      );
+      await attemptProvider(
+        candidate.courtListener,
+        () => { courtListenerTriggered += 1; },
+        () => this.enrichCaseWithCourtListener(caseId, { force: true }),
+        () => { courtListenerSynced += 1; }
+      );
+      await attemptProvider(
+        candidate.recentFilings,
+        () => { recentFilingsTriggered += 1; },
+        () => this.enrichCaseWithRecentFilings(caseId, { force: true }),
+        () => { recentFilingsSynced += 1; }
+      );
+      await attemptProvider(
+        candidate.lawFirm61tro,
+        () => { lawFirmTriggered += 1; },
+        () => this.enrichCaseWithLawFirmLookup(caseId, { sourceIds: ["61tro"], force: true }),
+        () => { lawFirmSynced += 1; }
+      );
 
-        if (candidate.recentFilings) {
-          attempted = true;
-          recentFilingsTriggered += 1;
-          const result = await this.enrichCaseWithRecentFilings(caseId, { force: true });
-          if (result.enriched) {
-            recentFilingsSynced += 1;
-          }
-        }
-
-        if (candidate.lawFirm61tro) {
-          attempted = true;
-          lawFirmTriggered += 1;
-          const result = await this.enrichCaseWithLawFirmLookup(caseId, {
-            sourceIds: ["61tro"],
-            force: true
-          });
-          if (result.enriched) {
-            lawFirmSynced += 1;
-          }
-        }
-
-        if (attempted) {
-          triggeredCases += 1;
-        }
-      } catch {
+      if (attempted) {
+        triggeredCases += 1;
+      }
+      if (candidateFailed) {
         failedCases += 1;
       }
     }
