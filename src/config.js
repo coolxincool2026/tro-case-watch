@@ -222,6 +222,7 @@ export const config = {
     recentFilingsIntervalMs: envInt("RECENT_FILINGS_SCHEDULER_INTERVAL_MS", 20 * 60 * 1000),
     lawFirmsIntervalMs: envInt("LAW_FIRMS_SCHEDULER_INTERVAL_MS", 30 * 60 * 1000),
     courtListenerDocketIntervalMs: envInt("COURTLISTENER_DOCKET_SCHEDULER_INTERVAL_MS", 15 * 60 * 1000),
+    courtListenerAlertIntervalMs: envInt("COURTLISTENER_ALERT_SCHEDULER_INTERVAL_MS", 6 * 60 * 60 * 1000),
     backfillIntervalMs: envInt("BACKFILL_INTERVAL_MS", 60 * 60 * 1000),
     backfillSchedulerCheckIntervalMs: envInt("BACKFILL_SCHEDULER_CHECK_INTERVAL_MS", 15 * 60 * 1000),
     watchdogIntervalMs: envInt("SYNC_WATCHDOG_INTERVAL_MS", 2 * 60 * 1000),

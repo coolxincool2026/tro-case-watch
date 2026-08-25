@@ -1267,11 +1267,17 @@ export class CaseSyncService {
 
     if (includeCourtListener) {
       for (const query of queries) {
-        const payload = await this.courtListener.search({
-          query,
-          startDate: getDiscoveryStartDate(this.config),
-          pageSize: 20
-        });
+        let payload;
+        try {
+          payload = await this.courtListener.search({
+            query,
+            startDate: getDiscoveryStartDate(this.config),
+            pageSize: 20
+          });
+        } catch (error) {
+          sourceResults.courtlistener.error = error.message;
+          break;
+        }
 
         const matches = (payload.results || []).filter((result) =>
           this.lookupMatches(rawTerm, result, { courtName, caseName })

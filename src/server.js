@@ -4251,6 +4251,9 @@ async function main() {
   if (courtListener.hasDocketAccess()) {
     scheduleSourceMode("courtlistener-docket", config.sync.courtListenerDocketIntervalMs, 270 * 1000);
   }
+  if (courtListener.hasDocketAlertAccess()) {
+    scheduleSourceMode("courtlistener-alerts", config.sync.courtListenerAlertIntervalMs, 330 * 1000);
+  }
 
   if (config.sync.bootstrapSync) {
     setTimeout(() => {
@@ -4296,16 +4299,6 @@ async function main() {
 
       spawnDetachedTaskIfDue("backfill", config.sync.backfillIntervalMs);
     }, backfillCheckIntervalMs);
-  }
-
-  if (courtListener.hasDocketAlertAccess()) {
-    setTimeout(() => {
-      spawnDetachedTask(["--sync-only", "courtlistener-alerts"]);
-    }, Math.max(Number(config.courtListener?.docketAlertSyncBootstrapDelayMs || 90 * 1000), 10 * 1000));
-
-    setInterval(() => {
-      spawnDetachedTask(["--sync-only", "courtlistener-alerts"]);
-    }, Math.max(Number(config.courtListener?.docketAlertSyncIntervalMs || 6 * 60 * 60 * 1000), 60 * 60 * 1000));
   }
 
   if (config.reports?.dailyEmail?.enabled) {

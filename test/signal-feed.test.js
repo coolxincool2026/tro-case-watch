@@ -103,3 +103,24 @@ test("known cases retry canonical public detail URL variants", async () => {
   assert.equal(item.entries.length, 1);
   assert.ok(requested.some((url) => url.includes("/cases/") && !url.includes("/en/cases/")));
 });
+
+test("known cases do not retry URL variants after a transient failure", async () => {
+  const client = new SignalFeedClient({
+    enabled: true,
+    publicCasesUrl: "https://example.test/en/cases/"
+  });
+  let requests = 0;
+  client.fetchPublicDetail = async () => {
+    requests += 1;
+    const error = new Error("rate limited");
+    error.status = 429;
+    throw error;
+  };
+
+  await assert.rejects(() => client.fetchKnownCase({
+    docketId: "abc",
+    docketNumber: "2:26-cv-00651",
+    detailUrl: "https://example.test/en/cases/abc-case"
+  }), /rate limited/);
+  assert.equal(requests, 1);
+});

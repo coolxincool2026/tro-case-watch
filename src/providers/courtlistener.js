@@ -243,7 +243,7 @@ export class CourtListenerClient {
       headers["content-type"] = contentType;
     }
 
-    if (this.apiToken) {
+    if (requiresAuth && this.apiToken) {
       headers.authorization = `Token ${this.apiToken}`;
     }
 

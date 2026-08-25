@@ -278,6 +278,9 @@ export class SignalFeedClient {
         }
       } catch (error) {
         lastError = error;
+        if (Number(error?.status || 0) !== 404) {
+          throw error;
+        }
       }
     }
 
