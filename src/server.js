@@ -154,11 +154,11 @@ const supportedWebhookEnrichmentProviders = new Set([
   "unicourt"
 ]);
 const standaloneSyncTaskLockMinutes = new Map([
-  [SIGNAL_FEED_PROVIDER_KEY, 15],
+  [SIGNAL_FEED_PROVIDER_KEY, 5],
   ["catalog", 30],
-  ["courtfeeds", 20],
-  ["recentfilings", 20],
-  ["lawfirms", 30],
+  ["courtfeeds", 8],
+  ["recentfilings", 8],
+  ["lawfirms", 10],
   ["pacermonitor", 30],
   ["pacer", 30],
   ["docketalarm", 30],
